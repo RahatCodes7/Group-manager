@@ -8,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 import os
 import re
+import html
 import asyncio
 from typing import Optional
 
@@ -409,7 +410,7 @@ async def broadcast(
             try:
                 bot_manager.bot.send_message(
                     int(tid),
-                    f"📢 <b>BROADCAST</b>\n\n{message}",
+                    f"📢 <b>BROADCAST</b>\n\n{html.escape(message)}",
                     parse_mode="HTML"
                 )
                 count += 1
@@ -521,7 +522,7 @@ async def group_message(
     if not chat_id.strip() or not message.strip():
         return JSONResponse({"ok": False, "error": "chat_id and message are required"}, status_code=400)
     try:
-        bot_manager.bot.send_message(int(chat_id.strip()), message.strip(), parse_mode="HTML")
+        bot_manager.bot.send_message(int(chat_id.strip()), html.escape(message.strip()), parse_mode="HTML")
         db.log_event(f"📨 Direct message sent to group {chat_id}")
         return JSONResponse({"ok": True})
     except Exception as e:
