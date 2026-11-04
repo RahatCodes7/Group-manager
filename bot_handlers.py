@@ -925,8 +925,72 @@ def register_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data == "show_help")
     def help_callback(call):
-        cmd_help(call.message)
         bot.answer_callback_query(call.id)
+        # Show help inline in the current chat instead of relying on DM
+        text = ("<b>🛠️ Bot Commands List</b>\n\n"
+                "<b>🛡️ Moderation:</b>\n"
+                "• /ban - Permanent ban\n"
+                "• /unban - Revoke ban\n"
+                "• /tmute @user 1h [reason] - <b>Timed mute (NEW)</b>\n"
+                "• /tban @user 1d [reason] - <b>Timed ban (NEW)</b>\n"
+                "• /mutelist - Show active mutes <b>(NEW)</b>\n"
+                "• /banlist - Show active bans <b>(NEW)</b>\n"
+                "• /kick - Remove user (can rejoin)\n"
+                "• /mute - Silence user\n"
+                "• /unmute - Restore chat\n"
+                "• /warn - Formal warning (3 = ban)\n\n"
+                "• /removewarn - Remove 1 warning (alias: /unwarn, /delwarn)\n"
+                "• /resetwarn - Clear all warnings (alias: /clearwarn)\n\n"
+                "• /keywordalert - Toggle keyword alert (admins)\n"
+                "• /setkeywords - Set alert keywords (e.g. @admin,help)\n"
+                "<b>⏰ Duration Formats:</b>\n"
+                "1m (minute), 1h (hour), 1d (day), 1w (week), 1mn (month), 1y (year)\n\n"
+                "<b>👮 Admin Tools:</b>\n"
+                "• /lock - Lock group (Admins only)\n"
+                "• /lock <type> - Lock specific: sticker|gif|media|url|forward|inline|poll|game|chat_off|all\n"
+                "• /unlock - Unlock group\n"
+                "• /unlock <type> - Unlock specific type\n"
+                "• /locks - Show locks status\n"
+                "• /promote - Give admin rights\n"
+                "• /demote - Remove admin rights\n"
+                "• /settitle - Change group name\n"
+                "• /setdesc - Change group description\n"
+                "• /pin - Pin message\n"
+                "• /unpin - Unpin all\n"
+                "• /del - Delete message\n"
+                "• /report - Alert group admins\n"
+                "• /link - Get group invite link\n\n"
+                "<b>🤖 Automation & Auto-Mod:</b>\n"
+                "• /setwelcome - Set greeting (reply to text/photo/GIF)\n"
+                "• /setleave - Set goodbye (reply to text/photo/GIF)\n"
+                "• /setrules - Set group rules\n"
+                "• /rules - Show group rules\n"
+                "• /addfilter - Create auto-reply\n"
+                "• /removefilter - Delete auto-reply\n"
+                "• /filters - List active filters\n"
+                "• /addbadword - Add word to auto-mod\n"
+                "• /delbadword - Remove auto-mod word\n"
+                "• /antispam - Toggle Anti-Spam (links & promo spam blocked)\n\n"
+                "<b>📊 Information:</b>\n"
+                "• /info - User profile & status\n"
+                "• /admins - List all group admins\n"
+                "• /send - Bot sends a message\n"
+                "• /rankings - Chat activity leaderboard (Overall/Today/Week)\n"
+                "• /top - Alias for /rankings\n"
+                "• /mystats - Your personal chat statistics\n"
+                "• /chatstats - This group's chat statistics\n"
+                "• /start - Bot introduction\n\n"
+                "<b>🎮 Chat Activity:</b>\n"
+                "• /activity - Toggle tracking, milestones & leaderboard (Admins)\n"
+                "• /resetactivity - Reset this group's chat stats (Admins)\n\n"
+                "<b>💡 Examples:</b>\n"
+                "/tmute @spammer 1h spam\n"
+                "/tban @baduser 3d violation\n"
+                "/warn → reply to user message")
+        if call.message.chat.type == 'private':
+            bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+        else:
+            bot.reply_to(call.message, text, parse_mode="HTML")
 
     # ── /help ──
     @bot.message_handler(commands=['help'])
