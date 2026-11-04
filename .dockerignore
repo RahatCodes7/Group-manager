@@ -13,5 +13,3 @@ Dockerfile
 README.md
 DEPLOY_GUIDE.md
 render.yaml
-Procfile
-.env.example
