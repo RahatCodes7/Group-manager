@@ -32,7 +32,6 @@ COPY --from=builder /venv /venv
 COPY app.py bot_handlers.py bot_manager.py chat_activity.py database.py migrate_to_pg.py tictactoe.py ./
 COPY templates ./templates
 COPY manager.db ./
-COPY Procfile .env.example ./
 
 EXPOSE 8000
 
