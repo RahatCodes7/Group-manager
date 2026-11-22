@@ -101,7 +101,10 @@ async def lifespan(application: FastAPI):
     if env_token:
         # On Render: env token present — auto-start the bot unconditionally
         config = db.get_config()
-        # Persist the token to DB if not already saved (first deploy)
+        # Env is the FIRST-BOOT SEED: persist it to the database only when the
+        # DB has no value of its own. Once the owner saves via the dashboard,
+        # the database is the runtime source of truth — a redeploy must never
+        # clobber dashboard-saved settings with a stale env value.
         if not config.get("bot_token", "").strip():
             db.update_config("bot_token", env_token)
         # Sync OWNER_USERNAME from env
