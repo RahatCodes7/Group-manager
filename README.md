@@ -43,12 +43,12 @@ welcome message and every sub-page button:
 - **❔ Help** — Help Center with real per-topic guides.
 - **✨ About** — real project info: name, description, version (when configured),
   features, chat types, database, engine, developer and runtime status.
-- **👨‍💻 Developer** — name, username, profile, support contact, GitHub and other
-  projects — hidden when unconfigured.
+- **👨‍💻 Developer** — name, username, profile, support contact, support channel
+  (`SUPPORT_CHANNEL`) and support group (via `/setgroup`) — hidden when unconfigured.
 - **📢 Updates** — current version and *configured* release notes only; never fabricated.
 - **➕ Add to Group** — deep link to add the bot to a group (`?startgroup=true`).
 
-The dashboard is built from real config and live PostgreSQL stats — no hardcoded
+The dashboard is built from real config and live PostgreSQL data — no hardcoded
 numbers, no simulated release notes, no fake features. Welcome media is optional
 (`WELCOME_MEDIA`/`WELCOME_MEDIA_TYPE`) with automatic text fallback.
 

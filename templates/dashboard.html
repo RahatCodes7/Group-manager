@@ -197,8 +197,6 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
       </div>
 
       <div class="stats-grid">
-        <div class="stat-card"><div class="s-icon">👥</div><div class="s-val" id="stat-users">{{ stats.total_users }}</div><div class="s-lbl">Users</div></div>
-        <div class="stat-card c-cyan"><div class="s-icon">🏘️</div><div class="s-val" id="stat-groups">{{ stats.total_groups }}</div><div class="s-lbl">Groups</div></div>
         <div class="stat-card c-green"><div class="s-icon">💬</div><div class="s-val" id="stat-messages">{{ stats.total_messages }}</div><div class="s-lbl">Messages</div></div>
         <div class="stat-card c-yellow"><div class="s-icon">🔍</div><div class="s-val" id="stat-filters">{{ stats.total_filters }}</div><div class="s-lbl">Filters</div></div>
         <div class="stat-card c-red"><div class="s-icon">🚫</div><div class="s-val" id="stat-badwords">{{ stats.total_bad_words }}</div><div class="s-lbl">Bad Words</div></div>
@@ -263,7 +261,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
     <!-- ── USERS ── -->
     <section class="section" id="section-users">
       <div class="page-header">
-        <div><div class="page-title">Users Registry</div><div class="page-subtitle">{{ users|length }} registered users</div></div>
+        <div><div class="page-title">Users Registry</div><div class="page-subtitle">All registered users</div></div>
       </div>
       <div class="card" style="margin-bottom:20px;">
         <div class="card-title" style="margin-bottom:16px;">➕ Add User Manually</div>
@@ -460,8 +458,6 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
       </div>
 
       <div class="stats-grid">
-        <div class="stat-card c-cyan"><div class="s-icon">👥</div><div class="s-val" id="sync-total-users">—</div><div class="s-lbl">Registered Users</div></div>
-        <div class="stat-card"><div class="s-icon">🏘️</div><div class="s-val" id="sync-total-groups">—</div><div class="s-lbl">Registered Groups</div></div>
         <div class="stat-card c-green"><div class="s-icon">🔗</div><div class="s-val" id="sync-total-memberships">—</div><div class="s-lbl">Known Memberships</div></div>
         <div class="stat-card c-yellow"><div class="s-icon">⏳</div><div class="s-val" id="sync-active-jobs">—</div><div class="s-lbl">Currently Syncing</div></div>
         <div class="stat-card c-green"><div class="s-icon">✅</div><div class="s-val" id="sync-success-jobs">—</div><div class="s-lbl">Successfully Synced</div></div>
@@ -546,7 +542,6 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
         </div>
         <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
           <div class="badge badge-primary" id="lbTotal">Total: —</div>
-          <div class="badge badge-muted" id="lbTotalUsers">Users: —</div>
           <div class="badge badge-cyan" id="lbModeBadge">Mode: Overall</div>
         </div>
       </div>
@@ -690,8 +685,8 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
           <div class="form-group">
             <label>Recipient Target</label>
             <select name="target">
-              <option value="groups">📡 All Groups ({{ stats.total_groups }} targets)</option>
-              <option value="users">👤 All Users ({{ stats.total_users }} targets)</option>
+              <option value="groups">📡 All Groups</option>
+              <option value="users">👤 All Users</option>
             </select>
           </div>
           <button type="submit" class="btn btn-primary btn-full">🚀 Transmit Broadcast</button>
@@ -840,7 +835,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
           <form action="/api/settings" method="POST">
             <div class="form-group"><label>Bot Token</label><input type="password" name="bot_token" value="{{ config.bot_token }}" placeholder="1234567890:ABCdef…" autocomplete="new-password"></div>
             <div class="form-group"><label>Owner Username (without @)</label><input type="text" name="owner_username" value="{{ config.owner_username }}" placeholder="myusername"></div>
-            <div class="form-group"><label>📢 Support Channel Username (without @)</label><input type="text" name="support_channel" value="{{ config.support_channel or '' }}" placeholder="mysupportchannel"><small style="color:var(--text-muted);font-size:0.78rem;display:block;margin-top:5px;">Shown as a button in /start. Leave blank to hide.</small></div>
+            <div class="form-group"><label>📢 Support Channel Username (without @)</label><input type="text" name="support_channel" value="{{ config.support_channel or '' }}" placeholder="mysupportchannel"><small style="color:var(--text-muted);font-size:0.78rem;display:block;margin-top:5px;">Shown on the Developer page in the private dashboard. Leave blank to hide.</small></div>
             <button type="submit" class="btn btn-primary">💾 Save &amp; Apply</button>
           </form>
         </div>
@@ -1171,7 +1166,6 @@ async function refreshStats(){
   try{
     const d=await (await fetch('/api/stats')).json();
     const set=(id,v)=>{const el=document.getElementById(id);if(el&&el.textContent!=v)el.textContent=v;};
-    set('stat-users',d.total_users);set('stat-groups',d.total_groups);
     set('stat-messages',d.total_messages);set('stat-filters',d.total_filters);
     set('stat-badwords',d.total_bad_words);set('stat-warned',d.total_warned_users||0);
     const sb=document.getElementById('sidebarStatus');
@@ -1184,8 +1178,6 @@ async function refreshSync(){
   try{
     const d = await (await fetch('/api/sync_status')).json();
     const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
-    set('sync-total-users', d.total_users ?? 0);
-    set('sync-total-groups', d.total_groups ?? 0);
     set('sync-total-memberships', d.total_memberships ?? 0);
     set('sync-active-jobs', d.active_jobs ?? 0);
     set('sync-success-jobs', d.success_jobs ?? 0);
@@ -1721,7 +1713,6 @@ async function loadLeaderboard(){
   const gid = document.getElementById('lbGroupSelect').value;
   const tbody = document.getElementById('lbTableBody');
   const totalEl = document.getElementById('lbTotal');
-  const totalUsersEl = document.getElementById('lbTotalUsers');
   const countBadge = document.getElementById('lbCountBadge');
   const pagination = document.getElementById('lbPagination');
   const imgBtn = document.getElementById('lbImageBtn');
@@ -1729,7 +1720,6 @@ async function loadLeaderboard(){
   if(!gid){
     tbody.innerHTML = '<tr><td colspan="4" class="empty">Select a group to view rankings</td></tr>';
     totalEl.textContent = 'Total: —';
-    totalUsersEl.textContent = 'Users: —';
     countBadge.textContent = '—';
     pagination.innerHTML = '';
     imgBtn.style.display = 'none';
@@ -1742,7 +1732,6 @@ async function loadLeaderboard(){
     const d = await res.json();
     if(!d.ok){ tbody.innerHTML = `<tr><td colspan="4" class="empty">Error: ${esc(d.error||'failed')}</td></tr>`; return; }
     totalEl.textContent = 'Total: ' + (d.total||0).toLocaleString();
-    totalUsersEl.textContent = 'Users: ' + (d.total_users||0);
     countBadge.textContent = d.entries.length + ' shown';
     if(d.entries.length===0){
       tbody.innerHTML = '<tr><td colspan="4" class="empty">No rankings yet — start chatting!</td></tr>';

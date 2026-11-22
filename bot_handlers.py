@@ -1398,55 +1398,19 @@ def register_handlers(bot):
 
         if message.chat.type in ['group', 'supergroup']:
             db.ensure_group(message.chat.id, name=getattr(message.chat, 'title', None))
-            config          = db.get_config()
-            owner           = config.get("owner_username", "OwnerUser123")
-            support_channel = config.get("support_channel", "").strip().replace("@", "")
-            main_group_link = config.get("main_group_link", "").strip()
             bot_username    = bot.get_me().username
 
+            # New group /start: personalize + deep-link that opens the DM
+            # and triggers /start automatically. One full-width CTA button.
+            first = html.escape(str(first_name or "there"))
+            text = f"Hey, <b>{first}</b>!\n\nStart me in DM to access the bot."
             markup = InlineKeyboardMarkup()
-
-            # ── Row 1: Join Main Group (if set) ──
-            if main_group_link:
-                markup.row(
-                    InlineKeyboardButton(
-                        "🚀 Join Our Main Group",
-                        url=main_group_link
-                    )
-                )
-
-            # ── Row 2: Add Me to Your Group ──
             markup.row(
                 InlineKeyboardButton(
-                    "➕ Add Me to Your Group",
-                    url=f"https://t.me/{bot_username}?startgroup=true"
+                    "🚀 START BOT",
+                    url=f"https://t.me/{bot_username}?start=start",
+                    style="primary",
                 )
-            )
-
-            # ── Row 3: Commands & Help + Support Channel ──
-            row3 = [InlineKeyboardButton("📜 Commands & Help", callback_data="show_help")]
-            if support_channel:
-                row3.append(InlineKeyboardButton("📢 Support Channel", url=f"https://t.me/{support_channel}"))
-            markup.row(*row3)
-
-            # ── Row 4: Contact Owner ──
-            markup.row(InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{owner}"))
-
-            first = html.escape(str(first_name or "there"))
-            line = "━" * 16
-            text = (
-                f"✦ HEY, {first}\n"
-                f"Welcome to <b>Ultimate Group Manager</b>.\n\n"
-                f"Your smart solution for powerful,\n"
-                f"secure & effortless group management.\n\n"
-                f"{line}\n\n"
-                f"🛡️ Protect your community\n"
-                f"⚔️ Moderate with precision\n"
-                f"👋 Automate every welcome\n"
-                f"📊 Track what matters\n\n"
-                f"{line}\n\n"
-                f"<b>Ultimate Group Manager</b>\n"
-                f"One Bot. Complete Control.\n"
             )
             bot.reply_to(message, text, reply_markup=markup, parse_mode="HTML")
             return

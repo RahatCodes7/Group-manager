@@ -53,10 +53,9 @@ a{color:#818cf8}
 
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <div style="font-weight:700;">Top {{ entries|length }} / {{ total_users }}</div>
+      <div style="font-weight:700;">Top {{ entries|length }}</div>
       <div style="display:flex;gap:8px;">
         <span class="badge badge-primary">Total: {{ total }}</span>
-        <span class="badge badge-muted">Users: {{ total_users }}</span>
       </div>
     </div>
     {% if entries %}
