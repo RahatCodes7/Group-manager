@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Form, Response, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, Request, Form, Response
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -14,6 +14,7 @@ from typing import Optional
 
 from database import db
 from bot_manager import bot_manager
+import group_sync
 import telebot.types as tg_types
 import hashlib
 from tictactoe import init_db
@@ -32,6 +33,32 @@ def _is_admin_authenticated(request: Request) -> bool:
     token = request.cookies.get("admin_auth", "")
     expected = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
     return token == expected
+
+
+# Paths that must stay publicly reachable (public leaderboard + health probes).
+# Everything else under /api/ and on the dashboard itself requires admin auth
+# when ADMIN_PASSWORD is set.
+PUBLIC_PATHS = {
+    "/health", "/ping",
+    "/login", "/logout",
+    "/leaderboard", "/lb",
+    "/api/rankings/image",  # embedded in the public leaderboard page
+}
+
+
+def _admin_guard(request: Request):
+    """Returns a response (401/redirect) when auth is required and fails, else None."""
+    if not ADMIN_PASSWORD:
+        return None
+    path = request.url.path.rstrip("/") or "/"
+    if path in PUBLIC_PATHS:
+        return None
+    if _is_admin_authenticated(request):
+        return None
+    # Public HTML dashboard -> redirect to login; data/API -> 401 JSON
+    if request.headers.get("accept", "").startswith("text/html"):
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -93,6 +120,13 @@ async def lifespan(application: FastAPI):
         if db.get_config().get("is_running", False):
             db.update_config("is_running", False)
 
+    # Mark orphaned sync jobs (e.g. killed mid-run) as interrupted so the
+    # dashboard never shows a phantom 'running' job that no worker owns.
+    try:
+        group_sync.mark_stale_jobs_on_startup()
+    except Exception as e:
+        print(f"⚠️ Could not mark stale sync jobs: {e}")
+
     yield
     bot_manager.stop_bot()
 
@@ -101,6 +135,19 @@ app = FastAPI(lifespan=lifespan, title="GroupBot Dashboard", version="8.0")
 
 os.makedirs("templates", exist_ok=True)
 templates = Jinja2Templates(directory="templates")
+
+
+@app.middleware("http")
+async def admin_auth_middleware(request: Request, call_next):
+    """Require the dashboard password for everything except public paths.
+
+    Public paths: health/ping probes, login, the public leaderboard and its
+    image endpoint (the leaderboard page is intentionally public).
+    """
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    return await call_next(request)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -117,8 +164,16 @@ async def health_check():
             c = db.conn.execute("SELECT 1")
             if hasattr(c, "fetchone"):
                 c.fetchone()
+            try:
+                db.conn.rollback()
+            except Exception:
+                pass
             db_alive = True
     except Exception:
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
         db_alive = False
     return {"status": "ok", "database": "connected" if db_alive else "unavailable"}
 
@@ -186,7 +241,7 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
     groups = db.get_all_groups()
     # No chat_id -> show group picker
     if not chat_id:
-        html = """
+        page_html = """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <title>Leaderboard — Pick a Group</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
@@ -195,11 +250,14 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
         """
         for gid, g in groups.items():
             name = g.get("name") or "Unknown Group"
-            html += f'<div class="g"><span>{name} <code>{gid}</code></span><a href="/leaderboard?chat_id={gid}&mode=overall">View →</a></div>'
+            # Escape everything interpolated into raw HTML (group names are user-controlled)
+            safe_name = html.escape(str(name))
+            safe_gid = html.escape(str(gid), quote=True)
+            page_html += f'<div class="g"><span>{safe_name} <code>{safe_gid}</code></span><a href="/leaderboard?chat_id={safe_gid}&mode=overall">View →</a></div>'
         if not groups:
-            html += '<p style="color:#64748b;">No groups yet</p>'
-        html += '</div></body></html>'
-        return HTMLResponse(html)
+            page_html += '<p style="color:#64748b;">No groups yet</p>'
+        page_html += '</div></body></html>'
+        return HTMLResponse(page_html)
     # Fetch data for given chat_id
     try:
         ref_key = None
@@ -215,7 +273,9 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
         g = db.get_group(chat_id)
         group_name = g.get("name", "") if g else ""
         max_msg = max((e.get("total_messages", 0) for e in entries), default=0) or 1
-        image_url = f"/api/rankings/image?chat_id={chat_id}&mode={mode}"
+        # Only offer the image when there is data to render — otherwise the
+        # image endpoint 404s and the page shows a broken image.
+        image_url = f"/api/rankings/image?chat_id={chat_id}&mode={mode}" if entries else None
         context = {
             "request": request,
             "chat_id": chat_id,
@@ -534,30 +594,39 @@ async def group_message(
 # ─────────────────────────────────────────────────────────────
 
 @app.post("/api/sync_data")
-async def sync_data(background_tasks: BackgroundTasks):
+async def sync_data():
+    """Queue a per-group sync job for every registered group.
+
+    Reuses the high-speed per-group sync engine (group_sync) so each group
+    gets a persisted job row in sync_jobs — status, progress and duplicate
+    prevention all live there. Any group that already has a pending/running
+    job is skipped, not queued twice.
+    """
     if not bot_manager.bot:
         return RedirectResponse(url="/?error=BotNotRunning", status_code=303)
-    background_tasks.add_task(perform_sync)
-    return RedirectResponse(url="/?success=SyncStartedInBackground", status_code=303)
-
-
-async def perform_sync():
     try:
         groups = list(db.get_all_groups().keys())
-        for gid in groups:
-            try:
-                chat         = bot_manager.bot.get_chat(int(gid))
-                member_count = bot_manager.bot.get_chat_member_count(int(gid))
-                db.ensure_group(gid, name=getattr(chat, 'title', None))
-                db.update_group_setting(gid, 'member_count', member_count)
-                db.log_event(f"✅ Synced: {getattr(chat, 'title', gid)}")
-            except Exception as e:
-                db.log_event(f"⚠️ Sync failed ({gid}): {str(e)[:60]}")
-            await asyncio.sleep(0.5)
-        db.log_event(f"🧠 Sync complete — {len(groups)} groups")
     except Exception as e:
-        import logging
-        logging.error(f"Sync Error: {e}")
+        return RedirectResponse(url=f"/?error=SyncFailed:{str(e)[:60].replace(' ','_').replace(':','_')}", status_code=303)
+    queued = 0
+    already = 0
+    failures = []
+    for gid in groups:
+        try:
+            job_id, msg = group_sync.start_sync_job(str(gid), reason="bulk", bot=bot_manager.bot)
+            if job_id is None:
+                failures.append(str(gid))
+            elif "already exists" in msg:
+                already += 1
+            else:
+                queued += 1
+        except Exception as e:
+            failures.append(str(gid))
+            db.log_event(f"⚠️ Bulk sync failed ({gid}): {str(e)[:80]}")
+    db.log_event(f"🧠 Bulk sync queued — {queued} group(s), {already} already running, {len(failures)} failed")
+    if failures and queued == 0:
+        return RedirectResponse(url="/?error=SyncFailed:SomeGroupsFailedToQueue", status_code=303)
+    return RedirectResponse(url="/?success=BulkSyncStarted", status_code=303)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -617,7 +686,7 @@ async def delete_entry(
 @app.post("/api/reset_warnings")
 async def reset_warnings(user_id: str = Form("")):
     try:
-        db.reset_warnings(user_id.strip())
+        db.warn_reset_user(user_id.strip())
         db.log_event(f"🔄 Warnings reset for user {user_id}")
         return RedirectResponse(url="/?success=WarningsReset", status_code=303)
     except Exception as e:
@@ -693,12 +762,15 @@ async def remote_action(
             label = "unmuted"
             db.log_event(f"🔊 Remote unmute: user {target_id_val} in group {chat_id}")
         elif action == "warn":
-            warnings = db.add_warning(target_id_val)
-            label    = f"warned ({warnings}/3)"
-            if warnings >= 3:
+            group = db.get_group(chat_id) or {}
+            limit = int(group.get("max_warnings", 3) or 3)
+            warn_time = int(group.get("warn_time", 0) or 0)
+            warnings = db.warn_add(chat_id, target_id_val, "Remote dashboard warn", None, warn_time)
+            label = f"warned ({warnings}/{limit})"
+            if warnings >= limit:
                 bot_manager.bot.ban_chat_member(chat_id, target_id_val)
-                db.reset_warnings(target_id_val)
-                label = "banned (3 warnings)"
+                db.warn_reset_user(target_id_val)
+                label = f"banned ({limit} warnings)"
             db.log_event(f"⚠️ Remote warn: user {target_id_val} in group {chat_id}")
         elif action == "promote":
             bot_manager.bot.promote_chat_member(chat_id, target_id_val,
@@ -1012,40 +1084,59 @@ async def create_group_link(chat_id: str = Form("")):
 
 
 # ─────────────────────────────────────────────────────────────
-# API — DATABASE DOWNLOAD (manager.db)
+# API — DATABASE DOWNLOAD (removed — PostgreSQL-only)
 # ─────────────────────────────────────────────────────────────
 
 @app.get("/api/download_database")
-async def download_database(ext: str = ""):
-    """Download the manager.db SQLite database file (or its shm/wal files)"""
+async def download_database():
+    """SQLite is no longer supported — the database is PostgreSQL-only.
+
+    Use a pg_dump/psql backup instead (see DEPLOY_GUIDE.md). This endpoint
+    exists only to give a clear, honest response instead of a 404.
+    """
+    return JSONResponse(
+        {"ok": False, "error": "SQLite is no longer supported. Use pg_dump/psql for backups (see DEPLOY_GUIDE.md)."},
+        status_code=410
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# API — GROUP SYNCHRONIZATION
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/api/sync_status")
+async def api_sync_status():
+    """JSON payload for the Group Synchronization dashboard section.
+
+    Counts are based on what the bot actually registered — never a fabricated
+    number. `members_total` (from the Bot API) is null unless Telegram
+    actually provided it (supergroup count).
+    """
+    return group_sync.get_sync_dashboard_data()
+
+
+@app.get("/api/sync_jobs")
+async def api_sync_jobs(chat_id: Optional[str] = None, limit: int = 50):
+    from database import db
+    return {"jobs": db.get_sync_jobs(limit=limit, chat_id=chat_id)}
+
+
+@app.post("/api/sync_group")
+async def api_sync_group(chat_id: str = Form("")):
+    """Manually trigger a sync job for a specific group (background)."""
+    chat_id = chat_id.strip()
+    if not chat_id.isdigit():
+        return RedirectResponse(url="/?error=SyncFailed:InvalidGroupID", status_code=303)
     try:
-        from pathlib import Path
-        
-        # Prevent path traversal or invalid extensions
-        if ext not in ["", "shm", "wal"]:
-            ext = ""
-            
-        filename = f"manager.db-{ext}" if ext else "manager.db"
-        db_file = Path(filename)
-
-        if not db_file.exists():
-            return JSONResponse(
-                {"ok": False, "error": f"{filename} not found (this is normal if WAL isn't active)"},
-                status_code=404
-            )
-
-        # Return the database file as a downloadable attachment
-        return Response(
-            content=db_file.read_bytes(),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    except Exception as e:
-        db.log_event(f"❌ Database download error: {str(e)}")
-        return JSONResponse(
-            {"ok": False, "error": str(e)},
-            status_code=500
-        )
+        int(chat_id)
+    except ValueError:
+        return RedirectResponse(url="/?error=SyncFailed:InvalidGroupID", status_code=303)
+    job_id, msg = group_sync.start_sync_job(chat_id, reason="manual", bot=bot_manager.bot)
+    if job_id is None:
+        return RedirectResponse(url=f"/?error=SyncFailed:{msg.replace(' ','_').replace(':','_')}", status_code=303)
+    if "already exists" in msg:
+        return RedirectResponse(url="/?success=SyncAlreadyRunning", status_code=303)
+    return RedirectResponse(url="/?success=SyncStarted", status_code=303)
 
 
 # ─────────────────────────────────────────────────────────────

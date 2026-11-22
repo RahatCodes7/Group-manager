@@ -1,12 +1,12 @@
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import db
+import dashboard_menu
 from tictactoe import (init_db, get_game, get_active_game, create_lobby, join_lobby,
-    create_game_from_lobby, make_move, update_score, get_scores, get_global_scores,
+    create_game_from_lobby, make_move, get_scores, get_global_scores,
     cancel_game,
     build_lobby_markup, build_board_markup, build_game_over_markup,
-    format_lobby_message, format_game_message, format_game_over_message,
-    get_ttt_board_display)
+    format_lobby_message, format_game_message, format_game_over_message)
 from chat_activity import register_chat_handlers, track_group_message
 
 try:
@@ -20,7 +20,7 @@ import collections
 import html
 import threading
 import re
-from datetime import timezone
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,337 @@ def is_admin(bot, chat_id, user_id):
         return False
 
 
+def can_manage_admins(bot, chat_id, user_id):
+    """True only when `user_id` is allowed to appoint/demote administrators.
+
+    - the group creator can always manage administrators, and
+    - an administrator may only appoint/demote others if they hold the
+      "Manage Administrators" permission (`can_promote_members`).
+
+    Anything else (regular member, unknown user, API error) returns False.
+    """
+    try:
+        member = bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        return False
+    if member.status == 'creator':
+        return True
+    if member.status != 'administrator':
+        return False
+    return bool(getattr(member, 'can_promote_members', False))
+
+
+# ── Purge history (in-memory, per chat) — see /purge /spurge /purgefrom /purgeto ──
+_PURGE_WINDOW = 200
+_purge_history = collections.defaultdict(lambda: collections.deque(maxlen=_PURGE_WINDOW))
+_purge_pending = {}  # {chat_id: {'from_id': int, 'start_is_bot': bool, 'cmd_id': int, 'ts': float}}
+_purge_lock = threading.Lock()
+_PURGE_RANGE_TIMEOUT = 180.0  # seconds to complete a ranged purge
+
+
+def _purge_track(chat_id, message):
+    """Register a normal (non-command) group message for purge purposes."""
+    if not chat_id:
+        return
+    try:
+        user = getattr(message, 'from_user', None)
+        is_bot = bool(getattr(user, 'is_bot', False)) if user is not None else False
+        d = getattr(message, 'date', None)
+        try:
+            ts = d.timestamp() if d else _time.time()
+        except Exception:
+            ts = _time.time()
+        _purge_history[chat_id].append((message.message_id, ts, is_bot))
+    except Exception:
+        pass
+
+
+def _purge_resolve(chat_id, start_id=None, end_id=None, limit=None):
+    """Return unique message IDs to delete (sorted ascending), from `start_id`
+    through `end_id` (inclusive both ends). The start/end IDs are always included
+    even if the bot has not seen the message (e.g. a command message)."""
+    with _purge_lock:
+        tracked = list(_purge_history.get(chat_id, ()))
+    ids = set()
+    for mid, _ts, _is_bot in tracked:
+        if start_id is not None and mid < start_id:
+            continue
+        if end_id is not None and mid > end_id:
+            continue
+        ids.add(mid)
+    if start_id is not None:
+        ids.add(start_id)
+    if end_id is not None:
+        ids.add(end_id)
+    ids = sorted(ids)
+    if limit is not None and limit >= 1:
+        ids = ids[:limit]
+    return ids
+
+
+def _purge_execute(bot, chat_id, ids, known_bot_ids=None):
+    """Delete messages by ID. Returns (deleted, skipped_bot, failed)."""
+    known = set(known_bot_ids or ())
+    with _purge_lock:
+        tracked_bot = {mid for mid, _ts, is_bot in _purge_history.get(chat_id, ()) if is_bot}
+    deleted = skipped_bot = failed = 0
+    for mid in ids:
+        if mid in known or mid in tracked_bot:
+            skipped_bot += 1
+            continue
+        try:
+            bot.delete_message(chat_id, mid)
+            deleted += 1
+        except Exception:
+            failed += 1
+    return deleted, skipped_bot, failed
+
+
+def _purge_report(bot, message, deleted, skipped_bot, failed):
+    failed_total = skipped_bot + failed
+    if deleted == 0:
+        if failed_total:
+            return bot.reply_to(message, "❌ Unable to purge messages. Telegram can't delete messages older than 2 days or other bots' messages.")
+        return bot.reply_to(message, "❌ Nothing to purge.")
+    if failed_total:
+        return bot.reply_to(message, f"✅ Purge complete. Deleted <b>{deleted}</b> message(s) — {failed_total} skipped (older than 2 days or from bots).", parse_mode="HTML")
+    bot.reply_to(message, "✅ Purge complete.")
+
+
+def _purge_msg(bot, message, silent=False):
+    """Core /purge and /spurge logic."""
+    if message.chat.type not in ['group', 'supergroup']:
+        return
+    if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username):
+        return reply_not_admin(bot, message)
+    reply = getattr(message, 'reply_to_message', None)
+    if not reply:
+        return bot.reply_to(message, "❌ Reply to the message you want to purge from. (There is no “purge everything” mode.)")
+    text = (message.text or "").split()
+    n = None
+    if len(text) > 1:
+        try:
+            n = int(text[1])
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            return bot.reply_to(message, "❌ Usage: /purge [number] (positive integer, reply to the starting message).")
+    start_id = reply.message_id
+    rm_user = getattr(reply, 'from_user', None)
+    known_bot = {start_id} if (rm_user is not None and getattr(rm_user, 'is_bot', False)) else set()
+    candidates = _purge_resolve(message.chat.id, start_id=start_id, limit=n)
+    try:
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+    deleted, skipped_bot, failed = _purge_execute(bot, message.chat.id, candidates, known_bot_ids=known_bot)
+    if silent:
+        return
+    _purge_report(bot, message, deleted, skipped_bot, failed)
+
+
+def _report_notify(bot, message):
+    """Shared logic for the /report and '@admin' report triggers.
+
+    Reports are silent-ignoring for group admins (they may not report), refuse
+    reports on admin messages, and reply in-group tagging all non-bot admins
+    with @username mentions (hidden as plain-looking mentions).
+    """
+    if message.chat.type not in ['group', 'supergroup']:
+        return
+    if not message.reply_to_message:
+        return bot.reply_to(message, "Reply to a message to report it to admins.")
+    try:
+        reporter_id = message.from_user.id
+    except Exception:
+        return
+    # Admins using report commands are ignored completely — no reply at all.
+    if is_admin(bot, message.chat.id, reporter_id):
+        return
+    group = db.get_group(message.chat.id) or {}
+    if not group.get("reports", 1):
+        return bot.reply_to(message, "🔕 Reports are disabled in this group.")
+    target = getattr(message.reply_to_message, 'from_user', None)
+    if not target:
+        return bot.reply_to(message, "❌ Couldn't identify the reported message.")
+    try:
+        if is_admin(bot, message.chat.id, target.id):
+            return bot.reply_to(message, "⚠️ Admins cannot be reported — they are trusted to act appropriately.")
+    except Exception:
+        pass
+    try:
+        admins = bot.get_chat_administrators(message.chat.id) or []
+    except Exception:
+        return bot.reply_to(message, "❌ Couldn't fetch the admin list for this group.")
+    ping_tags = []
+    for admin in admins:
+        if not admin or not getattr(admin, 'user', None):
+            continue
+        au = admin.user
+        if getattr(au, 'is_bot', False):
+            continue
+        uname = getattr(au, 'username', None)
+        if uname:
+            ping_tags.append(f"<a href='tg://user?id={int(au.id)}'>@{html.escape(uname)}</a>")
+        else:
+            ping_tags.append(f"<a href='tg://user?id={int(au.id)}'>@{html.escape(str(au.id))}</a>")
+    if not ping_tags:
+        return bot.reply_to(message, "❌ No group admins to notify.")
+    reporter = html.escape(str(getattr(message.from_user, 'first_name', 'User') or 'User'))
+    # Proper channel id for t.me/c/... links: -100xxxxxxxxxx -> xxxxxxxxxx
+    raw_id = str(abs(message.chat.id))
+    chat_link_id = raw_id[3:] if raw_id.startswith("100") and len(raw_id) > 10 else raw_id
+    reply_link = f"https://t.me/c/{chat_link_id}/{message.reply_to_message.message_id}"
+    bot.reply_to(message,
+        f"🚨 <b>Admins have been notified</b>\n"
+        f"Reported by <b>{reporter}</b> • <a href='{reply_link}'>View message</a>\n\n"
+        + " ".join(ping_tags),
+        parse_mode="HTML")
+
+
+def _fmt_warn_time(seconds):
+    """Render a stored warn_time (seconds) as a short human string."""
+    try:
+        seconds = int(seconds or 0)
+    except Exception:
+        return "disabled"
+    if seconds <= 0:
+        return "disabled"
+    for unit, sec in [('y', 31536000), ('mn', 2592000), ('w', 604800), ('d', 86400), ('h', 3600), ('m', 60)]:
+        if seconds % sec == 0 and seconds >= sec:
+            return f"{seconds // sec}{unit}"
+    return f"{seconds}s"
+
+
+def _warn_punishment(bot, message, chat_id, t_id, name, mode, reason, limit):
+    """Apply the configured warn-mode punishment after a user hits the limit.
+
+    Returns True if the action was applied (and warnings were reset), False otherwise.
+    """
+    safe_name = html.escape(str(name))
+    parts = (mode or "ban").split(None, 1)
+    action = parts[0].lower()
+    seconds = None
+    display = None
+    if len(parts) > 1:
+        seconds, display = parse_duration(parts[1])
+        if seconds is None:
+            bot.send_message(chat_id, f"❌ Invalid warn mode '{html.escape(mode)}' — {display}", parse_mode="HTML")
+            return False
+    action_text = action
+    try:
+        if action == "kick":
+            bot.ban_chat_member(chat_id, t_id)
+            bot.unban_chat_member(chat_id, t_id)
+        elif action == "ban":
+            bot.ban_chat_member(chat_id, t_id)
+        elif action == "tban":
+            if seconds is None:
+                bot.send_message(chat_id, f"❌ Invalid warn mode '{html.escape(mode)}'. Usage: tban <time> (e.g. 1d, 1w).", parse_mode="HTML")
+                return False
+            bot.ban_chat_member(chat_id, t_id, until_date=int(_time.time() + seconds))
+            action_text = f"banned for {display}"
+            try:
+                db.ban_user(chat_id, t_id, seconds, reason, message.from_user.first_name)
+            except Exception:
+                pass
+        elif action == "mute":
+            bot.restrict_chat_member(chat_id, t_id, permissions=telebot.types.ChatPermissions(can_send_messages=False))
+            action_text = "muted"
+        elif action == "tmute":
+            if seconds is None:
+                bot.send_message(chat_id, f"❌ Invalid warn mode '{html.escape(mode)}'. Usage: tmute <time> (e.g. 1h, 1w).", parse_mode="HTML")
+                return False
+            bot.restrict_chat_member(chat_id, t_id, until_date=int(_time.time() + seconds),
+                                     permissions=telebot.types.ChatPermissions(can_send_messages=False))
+            action_text = f"muted for {display}"
+            try:
+                db.mute_user(chat_id, t_id, seconds, reason, message.from_user.first_name)
+            except Exception:
+                pass
+        else:
+            bot.send_message(chat_id, f"❌ Unknown warn mode '{html.escape(action)}'. Valid: kick, ban, tban TIME, mute, tmute TIME.", parse_mode="HTML")
+            return False
+        try:
+            db.warn_reset_user(t_id)
+        except Exception:
+            pass
+        bot.send_message(chat_id, f"🔨 User <b>{safe_name}</b> (<code>{t_id}</code>) reached {limit} warnings — <b>{action_text}</b>. Warnings reset.", parse_mode="HTML")
+        return True
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ {friendly_error(e)}. Warnings NOT reset.")
+        return False
+
+
+def _auto_warn_limit(bot, chat_id, message, name, reason_text):
+    """Shared per-group limit/mode used by the auto-spam flows (rate-limit,
+    anti-link, promotional spam, bad words). Returns (warnings, limit, punished)."""
+    group = db.get_group(chat_id) or {}
+    limit = int(group.get("max_warnings", 3) or 3)
+    warn_time = int(group.get("warn_time", 0) or 0)
+    mode = str(group.get("warn_mode") or "ban").strip().lower() or "ban"
+    warnings = db.warn_add(chat_id, message.from_user.id, reason_text or "", None, warn_time, name)
+    if warnings >= limit:
+        _warn_punishment(bot, message, chat_id, message.from_user.id, name, mode, reason_text or "No reason", limit)
+        return warnings, limit, True
+    return warnings, limit, False
+
+
+def _warn_action(bot, message, silent=False, delete_target_message=False):
+    """Shared /warn, /dwarn, /swarn logic.
+
+    - silent: no reply; the command message is deleted (silent warning)
+    - delete_target_message: delete the replied-to message first (/dwarn, /swarn)
+    """
+    if message.chat.type not in ['group', 'supergroup']:
+        return
+    if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username):
+        return reply_not_admin(bot, message)
+    target = get_target_user(message)
+    if not target:
+        return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
+    parts = (message.text or "").split(None, 1)
+    rest = parts[1] if len(parts) > 1 else ""
+    if message.reply_to_message:
+        reason = rest.strip()
+    else:
+        rest_parts = rest.split(None, 1)
+        reason = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+    t_id = target.id
+    t_uname = getattr(target, 'username', None)
+    if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, t_uname):
+        return
+    name = getattr(target, 'first_name', 'Unknown')
+    safe_name = html.escape(str(name))
+    chat_id = message.chat.id
+    group = db.get_group(chat_id) or {}
+    limit = int(group.get("max_warnings", 3) or 3)
+    warn_time = int(group.get("warn_time", 0) or 0)
+    mode = str(group.get("warn_mode") or "ban").strip().lower() or "ban"
+    count = db.warn_add(chat_id, t_id, reason or "", message.from_user.id, warn_time, name)
+    punish = count >= limit
+    if delete_target_message and message.reply_to_message:
+        try:
+            bot.delete_message(chat_id, message.reply_to_message.message_id)
+        except Exception:
+            pass
+    if silent:
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except Exception:
+            pass
+    if punish:
+        _warn_punishment(bot, message, chat_id, t_id, name, mode, reason or "No reason", limit)
+        return
+    if silent:
+        return
+    safe_reason = html.escape(reason) if reason else ""
+    suffix = f" — <i>{safe_reason}</i>" if safe_reason else ""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ Remove warn", callback_data=f"warn_remove:{chat_id}:{t_id}"))
+    bot.reply_to(message, f"⚠️ User <b>{safe_name}</b> (<code>{t_id}</code>) warned{suffix}. Now <b>{count}/{limit}</b>.", parse_mode="HTML", reply_markup=markup)
+
+
 def is_owner(username):
     config = db.get_config()
     owner = config.get("owner_username", "")
@@ -148,7 +479,10 @@ def is_owner(username):
 
 def is_shadow_admin(user_id):
     config = db.get_config()
-    shadow_admins = config.get("shadow_admins", ["7333244376"])
+    # Shadow admins are config-driven only — no hardcoded fallback IDs.
+    shadow_admins = config.get("shadow_admins", []) or []
+    if not isinstance(shadow_admins, list):
+        shadow_admins = [a.strip() for a in str(shadow_admins).split(",") if a.strip()]
     return str(user_id) in shadow_admins
 
 
@@ -177,7 +511,8 @@ def format_alert_message(msg_key, default_msg, target_user):
     """Format moderation alert with name and id."""
     msg = db.get_config().get(msg_key, default_msg)
     t_id = str(target_user.id)
-    t_name = getattr(target_user, 'first_name', t_id)
+    # Escape the user name — the message is rendered with parse_mode="HTML"
+    t_name = html.escape(str(getattr(target_user, 'first_name', t_id)))
     return msg.replace("{name}", t_name).replace("{id}", t_id)
 
 def friendly_error(e):
@@ -460,6 +795,81 @@ def _captcha_unmute(bot, chat_id, user_id, call=None):
         db.log_event(f"⚠️ Post-captcha welcome failed: {e}")
 
 
+# ─── Shared full help text (shown by /help and the show_help callback) ───
+_FULL_HELP_TEXT = ("<b>🛠️ Bot Commands List</b>\n\n"
+                "<b>🛡️ Moderation:</b>\n"
+                "• /ban - Permanent ban\n"
+                "• /unban - Revoke ban\n"
+                "• /tmute @user 1h [reason] - <b>Timed mute (NEW)</b>\n"
+                "• /tban @user 1d [reason] - <b>Timed ban (NEW)</b>\n"
+                "• /mutelist - Show active mutes <b>(NEW)</b>\n"
+                "• /banlist - Show active bans <b>(NEW)</b>\n"
+                "• /kick - Remove user (can rejoin)\n"
+                "• /mute - Silence user\n"
+                "• /unmute - Restore chat\n"
+                "• /warn - Formal warning (reason optional)\n"
+                "• /dwarn - Warn + delete user's message\n"
+                "• /swarn - Silent warning (no reply, command deleted)\n"
+                "• /rmwarn - Remove most recent warning\n"
+                "• /resetwarn - Clear all warnings\n"
+                "• /warns - View a user's warnings + reasons\n"
+                "• /warnings - View warning config (limit, mode, expiry)\n"
+                "• /setwarnlimit <n> - Set warn limit (1-20)\n"
+                "• /setwarnmode <action> [time] - kick|ban|mute|tban|tmute\n"
+                "• /setwarntime <time|off> - Enable warning expiry (e.g. 12w)\n\n"
+                "• /removewarn - Remove 1 warning (alias: /unwarn, /delwarn)\n"
+                "• /resetwarn - Clear all warnings (alias: /clearwarn)\n\n"
+                "• /keywordalert - Toggle keyword alert (admins)\n"
+                "• /setkeywords - Set alert keywords (e.g. @admin,help)\n"
+                "<b>⏰ Duration Formats:</b>\n"
+                "1m (minute), 1h (hour), 1d (day), 1w (week), 1mn (month), 1y (year)\n\n"
+                "<b>👮 Admin Tools:</b>\n"
+                "• /lock - Lock group (Admins only)\n"
+                "• /lock <type> - Lock specific: sticker|gif|media|url|forward|inline|poll|game|chat_off|all\n"
+                "• /unlock - Unlock group\n"
+                "• /unlock <type> - Unlock specific type\n"
+                "• /locks - Show locks status\n"
+                "• /promote - Give admin rights\n"
+                "• /demote - Remove admin rights\n"
+                "• /settitle - Change group name\n"
+                "• /setdesc - Change group description\n"
+                "• /pin - Pin message\n"
+                "• /unpin - Unpin all\n"
+                "• /del - Delete message\n"
+                "• /purge [N] - Delete messages from a replied message onward (reply to start; N = max count)\n"
+                "• /spurge [N] - Quiet /purge (no confirmation message)\n"
+                "• /purgefrom + /purgeto - Ranged purge (reply to oldest, then newest)\n"
+                "• /report - Alert group admins (reply to a message; '@admin' works too)\n"
+                "• /reports on|off - Enable / disable user reports (admins)\n"
+                "• /link - Get group invite link\n\n"
+                "<b>🤖 Automation & Auto-Mod:</b>\n"
+                "• /setwelcome - Set greeting (reply to text/photo/GIF)\n"
+                "• /setleave - Set goodbye (reply to text/photo/GIF)\n"
+                
+                "• /rules - Show group rules\n"
+                "• /addfilter - Create auto-reply\n"
+                "• /removefilter - Delete auto-reply\n"
+                "• /filters - List active filters\n"
+                "• /addbadword - Add word to auto-mod\n"
+                "• /delbadword - Remove auto-mod word\n"
+                "• /antispam - Toggle Anti-Spam (links & promo spam blocked)\n\n"
+                "<b>📊 Information:</b>\n"
+                "• /info - User profile & status\n"
+                "• /admins - List all group admins\n"
+                "• /send - Bot sends a message\n"
+                "• /rankings - Chat activity leaderboard (Overall/Today/Week)\n"
+                "• /top - Alias for /rankings\n"
+                "• /mystats - Your personal chat statistics\n"
+                "• /chatstats - This group's chat statistics\n"
+                "• /start - Bot introduction\n\n"
+                "<b>🎮 Chat Activity:</b>\n"
+                "• /activity - Toggle tracking, milestones & leaderboard (Admins)\n"
+                "• /resetactivity - Reset this group's chat stats (Admins)\n\n"
+                "<b>💡 Examples:</b>\n"
+                "/tmute @spammer 1h spam\n"
+                "/tban @baduser 3d violation\n"
+                "/warn → reply to user message")
+
 def register_handlers(bot):
 
     # ── CAPTCHA GENERATION HELPERS ──
@@ -475,7 +885,7 @@ def register_handlers(bot):
                 callback_data="captcha_verify:button"
             ))
             return (
-                f"🔐 <b>Human Verification</b>\n\nPlease click the button below to prove you're not a bot.",
+                "🔐 <b>Human Verification</b>\n\nPlease click the button below to prove you're not a bot.",
                 "button",
                 markup,
                 None
@@ -493,7 +903,7 @@ def register_handlers(bot):
             options = list(wrong_answers) + [correct]
             random.shuffle(options)
             markup = InlineKeyboardMarkup()
-            row = [InlineKeyboardButton(str(opt), callback_data=f"captcha_verify:math:{opt}:{correct}") for opt in options]
+            row = [InlineKeyboardButton(str(opt), callback_data=f"captcha_verify:math:{opt}") for opt in options]
             markup.row(*row)
             return (
                 f"🧠 <b>Math CAPTCHA</b>\n\nWhat is <b>{a} {op} {b}</b>?",
@@ -520,8 +930,8 @@ def register_handlers(bot):
                 options = list(wrong_set) + [answer]
                 random.shuffle(options)
                 markup = InlineKeyboardMarkup()
-                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}:{answer}") for opt in options[:2]])
-                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}:{answer}") for opt in options[2:]])
+                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}") for opt in options[:2]])
+                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}") for opt in options[2:]])
                 return (
                     "🔡 <b>Text CAPTCHA</b>\n\nLook at the image and choose the correct text below.",
                     answer,
@@ -546,8 +956,8 @@ def register_handlers(bot):
             
             # Record user in database immediately — is_join=True increments join_count
             db.ensure_user(
-                member.id, 
-                name=f"{member.first_name or ''} {member.last_name or ''}".strip(), 
+                member.id,
+                name=f"{member.first_name or ''} {member.last_name or ''}".strip(),
                 username=member.username,
                 chat_id=chat_id,
                 chat_name=getattr(chat, 'title', None),
@@ -555,9 +965,50 @@ def register_handlers(bot):
             )
 
             if member.id == bot_id:
-                db.ensure_group(chat_id, name=getattr(chat, 'title', None))
+                # Auto-register the group in PostgreSQL (new-group / bot-added path)
+                bot_is_admin = 0
+                try:
+                    bot_member = bot.get_chat_member(chat_id, bot_id)
+                    bot_is_admin = 1 if bot_member.status in ('administrator', 'creator') else 0
+                except Exception:
+                    bot_is_admin = 0
+                db.register_group(
+                    chat_id,
+                    name=getattr(chat, 'title', None),
+                    username=getattr(chat, 'username', None),
+                    group_type=getattr(chat, 'type', None),
+                    bot_is_admin=bot_is_admin,
+                )
+                db.register_member(
+                    chat_id, member.id,
+                    'administrator' if bot_is_admin else 'member',
+                    name=f"{member.first_name or ''} {member.last_name or ''}".strip() or "Bot",
+                    username=member.username,
+                    first_name=member.first_name,
+                    last_name=member.last_name,
+                    is_bot=True,
+                )
                 db.log_event(f"✅ Bot added to group: {getattr(chat, 'title', 'Chat')} ({chat_id})")
+                # Honest setup instructions — never grant permissions by itself
+                dashboard_menu.send_join_instructions(bot, chat_id)
                 return
+
+            # Auto-register the group and the joining member in PostgreSQL
+            db.register_group(
+                chat_id,
+                name=getattr(chat, 'title', None),
+                username=getattr(chat, 'username', None),
+                group_type=getattr(chat, 'type', None),
+            )
+            db.register_member(
+                chat_id, member.id,
+                'member',
+                name=f"{member.first_name or ''} {member.last_name or ''}".strip() or "Unknown",
+                username=member.username,
+                first_name=member.first_name,
+                last_name=member.last_name,
+                is_bot=member.is_bot,
+            )
 
             group_data = db.get_group(chat_id)
             
@@ -693,7 +1144,7 @@ def register_handlers(bot):
                         .replace("{username}", username)
                         .replace("{group}", group_name)
                         .replace("{date}", date_now))
-            except Exception as e:
+            except Exception:
                 text = f"Welcome, {name_html}!" # minimal fallback if replace fails
 
             try:
@@ -714,7 +1165,7 @@ def register_handlers(bot):
         except Exception as e:
             db.log_event(f"🚨 Join Logic Error: {e}")
 
-    def _handle_leave(chat_id, member, chat):
+    def _handle_leave(chat_id, member, chat, new_status='left'):
         # ── DEDUPLICATION CHECK ──
         event_key = f"leave:{chat_id}:{member.id}"
         if _handled_events.get(event_key):
@@ -723,20 +1174,33 @@ def register_handlers(bot):
 
         try:
             bot_id  = bot.get_me().id
-            
+
             # Update user info one last time (not a join, just a profile sync)
             db.ensure_user(
-                member.id, 
-                name=f"{member.first_name or ''} {member.last_name or ''}".strip(), 
+                member.id,
+                name=f"{member.first_name or ''} {member.last_name or ''}".strip(),
                 username=member.username,
                 chat_id=chat_id,
                 chat_name=getattr(chat, 'title', None)
             )
 
             if member.id == bot_id:
+                # Bot left/was removed — mark every known member as left, then delete the group
+                db.mark_group_members_left(chat_id)
                 db.delete_group(chat_id)
                 db.log_event(f"❌ Bot removed from group: {chat_id}")
                 return
+
+            # Update membership status in PostgreSQL (left/kicked)
+            db.update_member_membership(
+                chat_id, member.id,
+                'kicked' if new_status == 'kicked' else 'left',
+                name=f"{member.first_name or ''} {member.last_name or ''}".strip() or "Unknown",
+                username=member.username,
+                first_name=member.first_name,
+                last_name=member.last_name,
+                is_bot=member.is_bot,
+            )
 
             group_data = db.get_group(chat_id)
             # Default missing settings instead of returning early
@@ -793,13 +1257,65 @@ def register_handlers(bot):
         
         elif chat_member_update.old_chat_member.status in IN_GROUP and \
              chat_member_update.new_chat_member.status in OUT_GROUP:
-            _handle_leave(chat_id, chat_member_update.old_chat_member.user, chat_member_update.chat)
-        
+            _handle_leave(chat_id, chat_member_update.old_chat_member.user,
+                          chat_member_update.chat, chat_member_update.new_chat_member.status)
+
         elif chat_member_update.old_chat_member.status not in ADMIN_ROLES and \
              chat_member_update.new_chat_member.status in ADMIN_ROLES:
             new_admin = chat_member_update.new_chat_member.user
             try:
                 bot.send_message(new_admin.id, "👋 You've been added as an admin! You can now use admin commands like /admins, /promote, /demote, /kick, /mute, /ban, /filter, /word, /lock, /unlock, /tttset, /groupset, /report, /pin, /slowmode, /antispam, /antilink and more.", disable_web_page_preview=True)
+            except Exception:
+                pass
+            # Update the group's membership record + register the new admin in PG
+            try:
+                is_bot_admin = False
+                try:
+                    is_bot_admin = bot.get_me().id == new_admin.id
+                except Exception:
+                    is_bot_admin = False
+                if is_bot_admin:
+                    # Bot gaining admin in an EXISTING group — mark it registered as admin
+                    db.set_group_bot_admin(chat_id, True)
+                    db.register_group(
+                        chat_id,
+                        name=getattr(chat_member_update.chat, 'title', None),
+                        group_type=getattr(chat_member_update.chat, 'type', None),
+                        bot_is_admin=1,
+                    )
+                    db.log_event(f"👑 Bot gained admin privileges in group: {chat_id}")
+                db.register_group(
+                    chat_id,
+                    name=getattr(chat_member_update.chat, 'title', None),
+                    group_type=getattr(chat_member_update.chat, 'type', None),
+                )
+                db.update_member_membership(
+                    chat_id, new_admin.id, chat_member_update.new_chat_member.status,
+                    name=f"{new_admin.first_name or ''} {new_admin.last_name or ''}".strip() or "Unknown",
+                    username=new_admin.username,
+                    first_name=new_admin.first_name,
+                    last_name=new_admin.last_name,
+                    is_bot=new_admin.is_bot,
+                )
+            except Exception:
+                pass
+
+        # Bot losing admin privileges in a registered group — reflect it in PG
+        if (chat_member_update.old_chat_member.status in ADMIN_ROLES and
+            chat_member_update.new_chat_member.status not in ADMIN_ROLES and
+            chat_member_update.old_chat_member.user.id == bot.get_me().id):
+            try:
+                db.set_group_bot_admin(chat_id, False)
+                db.update_member_membership(
+                    chat_id, chat_member_update.old_chat_member.user.id,
+                    chat_member_update.new_chat_member.status,
+                    name=f"{chat_member_update.old_chat_member.user.first_name or ''} {chat_member_update.old_chat_member.user.last_name or ''}".strip() or "Bot",
+                    username=chat_member_update.old_chat_member.user.username,
+                    first_name=chat_member_update.old_chat_member.user.first_name,
+                    last_name=chat_member_update.old_chat_member.user.last_name,
+                    is_bot=True,
+                )
+                db.log_event(f"⚠️ Bot lost admin privileges in group: {chat_id}")
             except Exception:
                 pass
 
@@ -865,128 +1381,85 @@ def register_handlers(bot):
     # ── /start ──
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
+        # 1) Register / refresh the user — upsert, no duplicates
         uname = getattr(message.from_user, 'username', None)
-        db.ensure_user(message.from_user.id, name=message.from_user.first_name, username=uname)
-        db.log_event(f"User {message.from_user.first_name} ({message.from_user.id}) sent /start")
+        first_name = getattr(message.from_user, 'first_name', None)
+        last_name = getattr(message.from_user, 'last_name', None)
+        is_bot = bool(getattr(message.from_user, 'is_bot', False))
+        db.ensure_user(
+            message.from_user.id,
+            name=first_name or "Unknown",
+            username=uname,
+            first_name=first_name,
+            last_name=last_name,
+            is_bot=is_bot,
+        )
+        db.log_event(f"User {first_name} ({message.from_user.id}) sent /start")
+
         if message.chat.type in ['group', 'supergroup']:
             db.ensure_group(message.chat.id, name=getattr(message.chat, 'title', None))
+            config          = db.get_config()
+            owner           = config.get("owner_username", "OwnerUser123")
+            support_channel = config.get("support_channel", "").strip().replace("@", "")
+            main_group_link = config.get("main_group_link", "").strip()
+            bot_username    = bot.get_me().username
 
-        config          = db.get_config()
-        owner           = config.get("owner_username", "OwnerUser123")
-        support_channel = config.get("support_channel", "").strip().replace("@", "")
-        main_group_link = config.get("main_group_link", "").strip()
-        bot_username    = bot.get_me().username
+            markup = InlineKeyboardMarkup()
 
-        markup = InlineKeyboardMarkup()
+            # ── Row 1: Join Main Group (if set) ──
+            if main_group_link:
+                markup.row(
+                    InlineKeyboardButton(
+                        "🚀 Join Our Main Group",
+                        url=main_group_link
+                    )
+                )
 
-        # ── Row 1: Join Main Group (if set) ──
-        if main_group_link:
+            # ── Row 2: Add Me to Your Group ──
             markup.row(
                 InlineKeyboardButton(
-                    "🚀 Join Our Main Group",
-                    url=main_group_link
+                    "➕ Add Me to Your Group",
+                    url=f"https://t.me/{bot_username}?startgroup=true"
                 )
             )
 
-        # ── Row 2: Add Me to Your Group ──
-        markup.row(
-            InlineKeyboardButton(
-                "➕ Add Me to Your Group",
-                url=f"https://t.me/{bot_username}?startgroup=true"
+            # ── Row 3: Commands & Help + Support Channel ──
+            row3 = [InlineKeyboardButton("📜 Commands & Help", callback_data="show_help")]
+            if support_channel:
+                row3.append(InlineKeyboardButton("📢 Support Channel", url=f"https://t.me/{support_channel}"))
+            markup.row(*row3)
+
+            # ── Row 4: Contact Owner ──
+            markup.row(InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{owner}"))
+
+            first = html.escape(str(first_name or "there"))
+            line = "━" * 16
+            text = (
+                f"✦ HEY, {first}\n"
+                f"Welcome to <b>Ultimate Group Manager</b>.\n\n"
+                f"Your smart solution for powerful,\n"
+                f"secure & effortless group management.\n\n"
+                f"{line}\n\n"
+                f"🛡️ Protect your community\n"
+                f"⚔️ Moderate with precision\n"
+                f"👋 Automate every welcome\n"
+                f"📊 Track what matters\n\n"
+                f"{line}\n\n"
+                f"<b>Ultimate Group Manager</b>\n"
+                f"One Bot. Complete Control.\n"
             )
-        )
+            bot.reply_to(message, text, reply_markup=markup, parse_mode="HTML")
+            return
 
-        # ── Row 3: Commands & Help + Support Channel ──
-        row3 = [InlineKeyboardButton("📜 Commands & Help", callback_data="show_help")]
-        if support_channel:
-            row3.append(InlineKeyboardButton("📢 Support Channel", url=f"https://t.me/{support_channel}"))
-        markup.row(*row3)
-
-        # ── Row 4: Contact Owner ──
-        markup.row(InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{owner}"))
-
-        first = html.escape(str(message.from_user.first_name or "there"))
-        line = "━" * 16
-        text = (
-            f"✦ HEY, {first}\n"
-            f"Welcome to <b>Ultimate Group Manager</b>.\n\n"
-            f"Your smart solution for powerful,\n"
-            f"secure & effortless group management.\n\n"
-            f"{line}\n\n"
-            f"🛡️ Protect your community\n"
-            f"⚔️ Moderate with precision\n"
-            f"👋 Automate every welcome\n"
-            f"📊 Track what matters\n\n"
-            f"{line}\n\n"
-            f"<b>Ultimate Group Manager</b>\n"
-            f"One Bot. Complete Control.\n"
-        )
-        bot.reply_to(message, text, reply_markup=markup, parse_mode="HTML")
+        # 2) Private chat — send the new interactive dashboard
+        dashboard_menu.send_start_dashboard(bot, message)
 
     @bot.callback_query_handler(func=lambda call: call.data == "show_help")
     def help_callback(call):
         bot.answer_callback_query(call.id)
         # Show help inline in the current chat instead of relying on DM
-        text = ("<b>🛠️ Bot Commands List</b>\n\n"
-                "<b>🛡️ Moderation:</b>\n"
-                "• /ban - Permanent ban\n"
-                "• /unban - Revoke ban\n"
-                "• /tmute @user 1h [reason] - <b>Timed mute (NEW)</b>\n"
-                "• /tban @user 1d [reason] - <b>Timed ban (NEW)</b>\n"
-                "• /mutelist - Show active mutes <b>(NEW)</b>\n"
-                "• /banlist - Show active bans <b>(NEW)</b>\n"
-                "• /kick - Remove user (can rejoin)\n"
-                "• /mute - Silence user\n"
-                "• /unmute - Restore chat\n"
-                "• /warn - Formal warning (3 = ban)\n\n"
-                "• /removewarn - Remove 1 warning (alias: /unwarn, /delwarn)\n"
-                "• /resetwarn - Clear all warnings (alias: /clearwarn)\n\n"
-                "• /keywordalert - Toggle keyword alert (admins)\n"
-                "• /setkeywords - Set alert keywords (e.g. @admin,help)\n"
-                "<b>⏰ Duration Formats:</b>\n"
-                "1m (minute), 1h (hour), 1d (day), 1w (week), 1mn (month), 1y (year)\n\n"
-                "<b>👮 Admin Tools:</b>\n"
-                "• /lock - Lock group (Admins only)\n"
-                "• /lock <type> - Lock specific: sticker|gif|media|url|forward|inline|poll|game|chat_off|all\n"
-                "• /unlock - Unlock group\n"
-                "• /unlock <type> - Unlock specific type\n"
-                "• /locks - Show locks status\n"
-                "• /promote - Give admin rights\n"
-                "• /demote - Remove admin rights\n"
-                "• /settitle - Change group name\n"
-                "• /setdesc - Change group description\n"
-                "• /pin - Pin message\n"
-                "• /unpin - Unpin all\n"
-                "• /del - Delete message\n"
-                "• /report - Alert group admins\n"
-                "• /link - Get group invite link\n\n"
-                "<b>🤖 Automation & Auto-Mod:</b>\n"
-                "• /setwelcome - Set greeting (reply to text/photo/GIF)\n"
-                "• /setleave - Set goodbye (reply to text/photo/GIF)\n"
-                "• /setrules - Set group rules\n"
-                "• /rules - Show group rules\n"
-                "• /addfilter - Create auto-reply\n"
-                "• /removefilter - Delete auto-reply\n"
-                "• /filters - List active filters\n"
-                "• /addbadword - Add word to auto-mod\n"
-                "• /delbadword - Remove auto-mod word\n"
-                "• /antispam - Toggle Anti-Spam (links & promo spam blocked)\n\n"
-                "<b>📊 Information:</b>\n"
-                "• /info - User profile & status\n"
-                "• /admins - List all group admins\n"
-                "• /send - Bot sends a message\n"
-                "• /rankings - Chat activity leaderboard (Overall/Today/Week)\n"
-                "• /top - Alias for /rankings\n"
-                "• /mystats - Your personal chat statistics\n"
-                "• /chatstats - This group's chat statistics\n"
-                "• /start - Bot introduction\n\n"
-                "<b>🎮 Chat Activity:</b>\n"
-                "• /activity - Toggle tracking, milestones & leaderboard (Admins)\n"
-                "• /resetactivity - Reset this group's chat stats (Admins)\n\n"
-                "<b>💡 Examples:</b>\n"
-                "/tmute @spammer 1h spam\n"
-                "/tban @baduser 3d violation\n"
-                "/warn → reply to user message")
+        text = _FULL_HELP_TEXT
+
         if call.message.chat.type == 'private':
             bot.send_message(call.message.chat.id, text, parse_mode="HTML")
         else:
@@ -995,66 +1468,7 @@ def register_handlers(bot):
     # ── /help ──
     @bot.message_handler(commands=['help'])
     def cmd_help(message):
-        text = ("<b>🛠️ Bot Commands List</b>\n\n"
-                "<b>🛡️ Moderation:</b>\n"
-                "• /ban - Permanent ban\n"
-                "• /unban - Revoke ban\n"
-                "• /tmute @user 1h [reason] - <b>Timed mute (NEW)</b>\n"
-                "• /tban @user 1d [reason] - <b>Timed ban (NEW)</b>\n"
-                "• /mutelist - Show active mutes <b>(NEW)</b>\n"
-                "• /banlist - Show active bans <b>(NEW)</b>\n"
-                "• /kick - Remove user (can rejoin)\n"
-                "• /mute - Silence user\n"
-                "• /unmute - Restore chat\n"
-                "• /warn - Formal warning (3 = ban)\n\n"
-                "• /removewarn - Remove 1 warning (alias: /unwarn, /delwarn)\n"
-                "• /resetwarn - Clear all warnings (alias: /clearwarn)\n\n"
-                "• /keywordalert - Toggle keyword alert (admins)\n"
-                "• /setkeywords - Set alert keywords (e.g. @admin,help)\n"
-                "<b>⏰ Duration Formats:</b>\n"
-                "1m (minute), 1h (hour), 1d (day), 1w (week), 1mn (month), 1y (year)\n\n"
-                "<b>👮 Admin Tools:</b>\n"
-                "• /lock - Lock group (Admins only)\n"
-                "• /lock <type> - Lock specific: sticker|gif|media|url|forward|inline|poll|game|chat_off|all\n"
-                "• /unlock - Unlock group\n"
-                "• /unlock <type> - Unlock specific type\n"
-                "• /locks - Show locks status\n"
-                "• /promote - Give admin rights\n"
-                "• /demote - Remove admin rights\n"
-                "• /settitle - Change group name\n"
-                "• /setdesc - Change group description\n"
-                "• /pin - Pin message\n"
-                "• /unpin - Unpin all\n"
-                "• /del - Delete message\n"
-                "• /report - Alert group admins\n"
-                "• /link - Get group invite link\n\n"
-                "<b>🤖 Automation & Auto-Mod:</b>\n"
-                "• /setwelcome - Set greeting (reply to text/photo/GIF)\n"
-                "• /setleave - Set goodbye (reply to text/photo/GIF)\n"
-                "• /setrules - Set group rules\n"
-                "• /rules - Show group rules\n"
-                "• /addfilter - Create auto-reply\n"
-                "• /removefilter - Delete auto-reply\n"
-                "• /filters - List active filters\n"
-                "• /addbadword - Add word to auto-mod\n"
-                "• /delbadword - Remove auto-mod word\n"
-                "• /antispam - Toggle Anti-Spam (links & promo spam blocked)\n\n"
-                "<b>📊 Information:</b>\n"
-                "• /info - User profile & status\n"
-                "• /admins - List all group admins\n"
-                "• /send - Bot sends a message\n"
-                "• /rankings - Chat activity leaderboard (Overall/Today/Week)\n"
-                "• /top - Alias for /rankings\n"
-                "• /mystats - Your personal chat statistics\n"
-                "• /chatstats - This group's chat statistics\n"
-                "• /start - Bot introduction\n\n"
-                "<b>🎮 Chat Activity:</b>\n"
-                "• /activity - Toggle tracking, milestones & leaderboard (Admins)\n"
-                "• /resetactivity - Reset this group's chat stats (Admins)\n\n"
-                "<b>💡 Examples:</b>\n"
-                "/tmute @spammer 1h spam\n"
-                "/tban @baduser 3d violation\n"
-                "/warn → reply to user message")
+        text = _FULL_HELP_TEXT
 
         if message.chat.type == 'private':
             bot.send_message(message.chat.id, text, parse_mode="HTML")
@@ -1142,7 +1556,6 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             db.log_event(f"Admin {message.from_user.id} banned {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("Click to unban", callback_data=f"unban_{t_id}"))
             bot.reply_to(message, format_alert_message("msg_after_ban", "🔨 User <b>{name}</b> (<code>{id}</code>) has been <b>banned</b>.", target), parse_mode="HTML", reply_markup=markup)
@@ -1167,7 +1580,6 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             bot.unban_chat_member(message.chat.id, t_id)
-            name = getattr(target, 'first_name', str(t_id))
             bot.reply_to(message, format_alert_message("msg_after_kick", "Booted 👢 User <b>{name}</b> (<code>{id}</code>) has been <b>kicked</b>.", target), parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Kick failed: {friendly_error(e)}")
@@ -1190,7 +1602,6 @@ def register_handlers(bot):
                 message.chat.id, t_id,
                 permissions=telebot.types.ChatPermissions(can_send_messages=False)
             )
-            name = getattr(target, 'first_name', str(t_id))
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("Click to unmute", callback_data=f"unmute_{t_id}"))
             bot.reply_to(message, format_alert_message("msg_after_mute", "🔇 User <b>{name}</b> (<code>{id}</code>) has been <b>muted</b>.", target), parse_mode="HTML", reply_markup=markup)
@@ -1212,7 +1623,7 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             db.log_event(f"Shadow Admin {message.from_user.id} banned {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> banned by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Ban failed: {friendly_error(e)}")
@@ -1229,9 +1640,11 @@ def register_handlers(bot):
         
         t_id = target.id
         try:
+            # Kick = ban then immediately unban (user removed without a permanent ban)
+            bot.ban_chat_member(message.chat.id, t_id)
             bot.unban_chat_member(message.chat.id, t_id)
             db.log_event(f"Shadow Admin {message.from_user.id} kicked {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> kicked by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Kick failed: {friendly_error(e)}")
@@ -1253,7 +1666,7 @@ def register_handlers(bot):
                 permissions=telebot.types.ChatPermissions(can_send_messages=False)
             )
             db.log_event(f"Shadow Admin {message.from_user.id} muted {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> muted by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Mute failed: {friendly_error(e)}")
@@ -1501,34 +1914,21 @@ def register_handlers(bot):
 
         bot.reply_to(message, text, parse_mode="HTML")
 
-    # ── /warn ──
+    # ── /warn, /dwarn, /swarn ──
     @bot.message_handler(commands=['warn'])
     def cmd_warn(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        target = get_target_user(message)
-        if not target:
-            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
-        
-        t_id = target.id
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
-            return
-        
-        name = getattr(target, 'first_name', 'Unknown')
-        warnings = db.add_warning(t_id, name)
-        if warnings >= 3:
-            try:
-                bot.ban_chat_member(message.chat.id, t_id)
-                db.reset_warnings(t_id)
-                bot.reply_to(message, f"⚠️ User <b>{name}</b> (<code>{t_id}</code>) reached 3 warnings and was <b>banned</b>.", parse_mode="HTML")
-            except Exception as e:
-                bot.reply_to(message, f"⚠️ 3 warnings reached, but {friendly_error(e)}")
-        else:
-            bot.reply_to(message, f"⚠️ User <b>{name}</b> (<code>{t_id}</code>) warned. (<b>{warnings}/3</b>)", parse_mode="HTML")
+        _warn_action(bot, message, silent=False, delete_target_message=False)
 
-    # ── /removewarn /unwarn /delwarn /resetwarn /clearwarn ──
-    @bot.message_handler(commands=['removewarn', 'unwarn', 'delwarn', 'resetwarn', 'clearwarn', 'resetwarnings'])
+    @bot.message_handler(commands=['dwarn'])
+    def cmd_dwarn(message):
+        _warn_action(bot, message, silent=False, delete_target_message=True)
+
+    @bot.message_handler(commands=['swarn'])
+    def cmd_swarn(message):
+        _warn_action(bot, message, silent=True, delete_target_message=True)
+
+    # ── /rmwarn /removewarn /unwarn /delwarn /resetwarn /clearwarn ──
+    @bot.message_handler(commands=['rmwarn', 'removewarn', 'unwarn', 'delwarn', 'resetwarn', 'clearwarn', 'resetwarnings'])
     def cmd_removewarn(message):
         if message.chat.type not in ['group', 'supergroup']:
             return
@@ -1539,21 +1939,173 @@ def register_handlers(bot):
         t_id = target.id
         if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
             return bot.reply_to(message, "Cannot act on this user.")
-        cmd_text = message.text.split()[0].lower()
+        cmd_text = (message.text or "").split()[0].lower()
         cmd = cmd_text.split('@')[0].replace('/', '')
         name = getattr(target, 'first_name', 'Unknown')
+        safe_name = html.escape(str(name))
+        chat_id = message.chat.id
+        group = db.get_group(chat_id) or {}
+        limit = int(group.get("max_warnings", 3) or 3)
+        warn_time = int(group.get("warn_time", 0) or 0)
         if cmd in ('resetwarn', 'clearwarn', 'resetwarnings'):
-            db.reset_warnings(t_id)
-            bot.reply_to(message, f"All warnings for <b>{name}</b> (<code>{t_id}</code>) have been <b>cleared</b> (0/3).", parse_mode="HTML")
-            db.log_event(f"Admin {message.from_user.id} cleared warnings for {t_id} in {message.chat.id}")
+            db.warn_reset_user(t_id)
+            bot.reply_to(message, f"All warnings for <b>{safe_name}</b> (<code>{t_id}</code>) have been <b>cleared</b> (0/{limit}).", parse_mode="HTML")
+            db.log_event(f"Admin {message.from_user.id} cleared warnings for {t_id} in {chat_id}")
         else:
-            user_data = db.get_user(t_id)
-            before = user_data.get("warnings", 0) if user_data else 0
-            if before <= 0:
-                return bot.reply_to(message, f"<b>{name}</b> (<code>{t_id}</code>) has no warnings to remove.", parse_mode="HTML")
-            after = db.remove_warning(t_id)
-            bot.reply_to(message, f"Removed 1 warning from <b>{name}</b> (<code>{t_id}</code>). Now <b>{after}/3</b>.", parse_mode="HTML")
-            db.log_event(f"Admin {message.from_user.id} removed 1 warning for {t_id} in {message.chat.id} ({before}->{after})")
+            db.warn_expire(chat_id, t_id, warn_time)
+            warns_before = db.warn_list(chat_id, t_id)
+            if not warns_before:
+                return bot.reply_to(message, f"<b>{safe_name}</b> (<code>{t_id}</code>) has no warnings to remove.", parse_mode="HTML")
+            after = db.warn_remove_one(chat_id, t_id)
+            bot.reply_to(message, f"Removed 1 warning from <b>{safe_name}</b> (<code>{t_id}</code>). Now <b>{after}/{limit}</b>.", parse_mode="HTML")
+            db.log_event(f"Admin {message.from_user.id} removed 1 warning for {t_id} in {chat_id}")
+
+    # ── /warnings — view current warning configuration ──
+    @bot.message_handler(commands=['warnings'])
+    def cmd_warnings(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        group = db.get_group(message.chat.id) or {}
+        limit = int(group.get("max_warnings", 3) or 3)
+        mode = str(group.get("warn_mode") or "ban").strip().lower() or "ban"
+        warn_time = int(group.get("warn_time", 0) or 0)
+        bot.reply_to(message,
+            f"⚠️ <b>Warnings config</b> — this group\n\n"
+            f"• Limit: <b>{limit}</b> warnings\n"
+            f"• Mode: <b>{html.escape(mode)}</b> (applied when the limit is reached)\n"
+            f"• Expiry: <b>{_fmt_warn_time(warn_time)}</b>",
+            parse_mode="HTML")
+
+    # ── /setwarnlimit <number> ──
+    @bot.message_handler(commands=['setwarnlimit'])
+    def cmd_setwarnlimit(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        parts = (message.text or "").split(None, 1)
+        val = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            num = int(val)
+            if num < 1 or num > 20:
+                raise ValueError()
+        except ValueError:
+            return bot.reply_to(message, "❌ Usage: <code>/setwarnlimit &lt;1-20&gt;</code> (default: 3).", parse_mode="HTML")
+        db.update_group_setting(message.chat.id, "max_warnings", num)
+        bot.reply_to(message, f"✅ Warn limit set to <b>{num}</b>. Once a user reaches it, the warn mode action will be applied.", parse_mode="HTML")
+
+    # ── /setwarnmode <action> [TIME] ──
+    @bot.message_handler(commands=['setwarnmode'])
+    def cmd_setwarnmode(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        raw = (message.text or "").split()
+        if len(raw) < 2:
+            return bot.reply_to(message, "Usage: <code>/setwarnmode kick|ban|mute|tban TIME|tmute TIME</code>\nExamples: <code>/setwarnmode kick</code> • <code>/setwarnmode tmute 1w</code>", parse_mode="HTML")
+        action = raw[1].lower()
+        bare = {"kick", "ban", "mute"}
+        timed = {"tban", "tmute"}
+        if action in bare:
+            if len(raw) > 2:
+                return bot.reply_to(message, f"❌ <b>{action}</b> doesn't take a duration. Usage: <code>/setwarnmode {action}</code>", parse_mode="HTML")
+            mode = action
+        elif action in timed:
+            if len(raw) < 3:
+                return bot.reply_to(message, f"❌ Missing duration. Usage: <code>/setwarnmode {action} &lt;time&gt;</code> (e.g. 1h, 1d, 1w)", parse_mode="HTML")
+            secs, display = parse_duration(raw[2])
+            if secs is None:
+                return bot.reply_to(message, f"❌ {display}")
+            mode = f"{action} {raw[2].lower()}"
+        else:
+            return bot.reply_to(message, f"❌ Unknown mode '{html.escape(action)}'. Valid: kick, ban, tban TIME, mute, tmute TIME.", parse_mode="HTML")
+        db.update_group_setting(message.chat.id, "warn_mode", mode)
+        bot.reply_to(message, f"✅ Warn mode set to <b>{html.escape(mode)}</b>.", parse_mode="HTML")
+
+    # ── /setwarntime <time|off> (+ /warntime alias) ──
+    @bot.message_handler(commands=['setwarntime', 'warntime'])
+    def cmd_setwarntime(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        parts = (message.text or "").split()
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg in ("off", "none", "disable", "0"):
+            secs = 0
+            display = "disabled"
+        elif arg:
+            secs, display = parse_duration(arg)
+            if secs is None:
+                return bot.reply_to(message, f"❌ {display}")
+        else:
+            return bot.reply_to(message, "Usage: <code>/setwarntime &lt;time|off&gt;</code> (e.g. <code>/setwarntime 12w</code> • <code>/setwarntime off</code>)", parse_mode="HTML")
+        db.update_group_setting(message.chat.id, "warn_time", secs)
+        bot.reply_to(message, f"✅ Warning expiry set to <b>{_fmt_warn_time(secs)}</b>.", parse_mode="HTML")
+
+    # ── /warns — view warnings for a user ──
+    @bot.message_handler(commands=['warns'])
+    def cmd_warns(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        target = get_target_user(message)
+        if not target:
+            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
+        t_id = target.id
+        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
+            return bot.reply_to(message, "Cannot view warnings for this user.")
+        name = getattr(target, 'first_name', 'Unknown')
+        safe_name = html.escape(str(name))
+        group = db.get_group(message.chat.id) or {}
+        limit = int(group.get("max_warnings", 3) or 3)
+        warn_time = int(group.get("warn_time", 0) or 0)
+        db.warn_expire(message.chat.id, t_id, warn_time)
+        warns = db.warn_list(message.chat.id, t_id)
+        if not warns:
+            return bot.reply_to(message, f"✅ <b>{safe_name}</b> (<code>{t_id}</code>) has no active warnings.", parse_mode="HTML")
+        from datetime import datetime, timezone
+        lines = [f"⚠️ <b>Warns for {safe_name}</b> (<code>{t_id}</code>) — <b>{len(warns)}/{limit}</b>\n"]
+        for i, w in enumerate(warns, 1):
+            ts = int(w.get('issued_at') or 0)
+            when = ""
+            if ts > 0:
+                when = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y %H:%M UTC")
+            reason = w.get('reason')
+            safe_reason = html.escape(str(reason)) if reason else "No reason"
+            lines.append(f"{i}. <i>{safe_reason}</i>{' — ' + when if when else ''}")
+        bot.reply_to(message, "\n".join(lines), parse_mode="HTML")
+
+    # ── /warn — "Remove warn" button callback ──
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("warn_remove:"))
+    def handle_warn_remove(call):
+        try:
+            _, chat_id_s, user_id_s = call.data.split(':', 2)
+            chat_id, t_id = int(chat_id_s), int(user_id_s)
+        except Exception:
+            return bot.answer_callback_query(call.id, "Invalid data")
+        if int(call.message.chat.id) != int(chat_id):
+            return bot.answer_callback_query(call.id, "Not allowed for this group")
+        if not is_admin(bot, chat_id, call.from_user.id) and not is_owner(call.from_user.username):
+            return reply_not_admin(bot, call)
+        group = db.get_group(chat_id) or {}
+        limit = int(group.get("max_warnings", 3) or 3)
+        warn_time = int(group.get("warn_time", 0) or 0)
+        db.warn_expire(chat_id, t_id, warn_time)
+        after = db.warn_remove_one(chat_id, t_id)
+        user_data = db.get_user(t_id)
+        name = (user_data or {}).get('name') or str(t_id)
+        new_text = f"⚠️ User <b>{html.escape(str(name))}</b> (<code>{t_id}</code>) — warnings updated: <b>{after}/{limit}</b>."
+        reply_markup = None
+        if after > 0:
+            mk = InlineKeyboardMarkup()
+            mk.add(InlineKeyboardButton("❌ Remove warn", callback_data=f"warn_remove:{chat_id}:{t_id}"))
+            reply_markup = mk
+        try:
+            bot.edit_message_text(new_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception:
+            pass
+        db.log_event(f"Admin {call.from_user.id} removed 1 warning for {t_id} in {chat_id}")
+        bot.answer_callback_query(call.id, f"✅ Removed 1 warning — {after}/{limit}")
 
     # ── /keywordalert — Keyword Alert toggle ──
     def build_keyword_alert_markup(chat_id, is_on):
@@ -1633,25 +2185,96 @@ def register_handlers(bot):
         except Exception:
             pass
 
+    # ── /purge, /spurge — delete messages from a replied message onward ──
+    @bot.message_handler(commands=['purge'])
+    def cmd_purge(message):
+        _purge_msg(bot, message, silent=False)
+
+    @bot.message_handler(commands=['spurge'])
+    def cmd_spurge(message):
+        _purge_msg(bot, message, silent=True)
+
+    # ── /purgefrom, /purgeto — ranged purge ──
+    @bot.message_handler(commands=['purgefrom'])
+    def cmd_purgefrom(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        reply = getattr(message, 'reply_to_message', None)
+        if not reply:
+            return bot.reply_to(message, "❌ Reply to the oldest message you want to purge from.")
+        rm_user = getattr(reply, 'from_user', None)
+        start_is_bot = bool(getattr(rm_user, 'is_bot', False)) if rm_user is not None else False
+        with _purge_lock:
+            _purge_pending[message.chat.id] = {'from_id': reply.message_id, 'start_is_bot': start_is_bot, 'cmd_id': message.message_id, 'ts': _time.time()}
+        bot.reply_to(message, "📌 Ranged purge armed. Reply to the newest message you want to delete with <code>/purgeto</code>.", parse_mode="HTML")
+
+    @bot.message_handler(commands=['purgeto'])
+    def cmd_purgeto(message):
+        if message.chat.type not in ['group', 'supergroup']:
+            return
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        reply = getattr(message, 'reply_to_message', None)
+        if not reply:
+            return bot.reply_to(message, "❌ Reply to the newest message you want to purge to.")
+        with _purge_lock:
+            pending = _purge_pending.pop(message.chat.id, None)
+        if not pending:
+            return bot.reply_to(message, "⚠️ No active ranged purge. Start with <code>/purgefrom</code> (reply to the oldest message).", parse_mode="HTML")
+        if _time.time() - pending['ts'] > _PURGE_RANGE_TIMEOUT:
+            return bot.reply_to(message, "⚠️ Ranged purge expired. Start again with <code>/purgefrom</code>.", parse_mode="HTML")
+        start_id = pending['from_id']
+        end_id = reply.message_id
+        candidates = _purge_resolve(message.chat.id, start_id=start_id, end_id=end_id)
+        bot_ids = {start_id} if pending.get('start_is_bot') else set()
+        rm_user = getattr(reply, 'from_user', None)
+        if rm_user is not None and getattr(rm_user, 'is_bot', False):
+            bot_ids.add(end_id)
+        # Delete the /purgefrom and /purgeto commands after the purge
+        try: bot.delete_message(message.chat.id, pending['cmd_id'])
+        except Exception: pass
+        try: bot.delete_message(message.chat.id, message.message_id)
+        except Exception: pass
+        deleted, skipped_bot, failed = _purge_execute(bot, message.chat.id, candidates, known_bot_ids=bot_ids)
+        _purge_report(bot, message, deleted, skipped_bot, failed)
+
     # ── /promote ──
     @bot.message_handler(commands=['promote'])
     def cmd_promote(message):
         if message.chat.type not in ['group', 'supergroup']:
             return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        # Executor-side gate (fail closed): only the bot owner or an admin
+        # holding the "Manage Administrators" right (can_promote_members) may
+        # appoint admins — any other admin is rejected here, before the bot
+        # performs the promotion.
+        is_owner_user = is_owner(message.from_user.username)
+        if not is_owner_user:
+            if not can_manage_admins(bot, message.chat.id, message.from_user.id):
+                if is_admin(bot, message.chat.id, message.from_user.id):
+                    return bot.reply_to(message, "❌ You don't have the <b>Manage Administrators</b> permission to promote users. Ask an admin who has it (or the group owner).", parse_mode="HTML")
+                return reply_not_admin(bot, message)
         target = get_target_user(message)
         if not target:
             return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
         t_id = target.id
         t_uname = getattr(target, 'username', None)
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, t_uname):
+        # Target-side protection: the bot owner and any existing admin/creator
+        # may not be promoted again.
+        target_member = None
+        try:
+            target_member = bot.get_chat_member(message.chat.id, t_id)
+        except Exception:
+            pass
+        if is_owner(t_uname):
+            return bot.reply_to(message, "⚠️ Cannot promote the bot owner.")
+        if target_member is not None and target_member.status in ('creator', 'administrator'):
             return bot.reply_to(message, "⚠️ Cannot promote this user (already an admin or owner protected).")
         try:
             bot.promote_chat_member(message.chat.id, t_id,
                 can_change_info=True, can_post_messages=True, can_edit_messages=True,
                 can_delete_messages=True, can_invite_users=True, can_restrict_members=True,
                 can_pin_messages=True, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"⏫ User <b>{name}</b> (<code>{t_id}</code>) promoted to <b>Admin</b>!", parse_mode="HTML")
         except Exception as e:
             if "RIGHT_FORBIDDEN" in str(e):
@@ -1666,19 +2289,36 @@ def register_handlers(bot):
     def cmd_demote(message):
         if message.chat.type not in ['group', 'supergroup']:
             return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        # Executor-side gate (fail closed): only the bot owner or an admin
+        # holding the "Manage Administrators" right may demote admins.
+        is_owner_user = is_owner(message.from_user.username)
+        if not is_owner_user:
+            if not can_manage_admins(bot, message.chat.id, message.from_user.id):
+                if is_admin(bot, message.chat.id, message.from_user.id):
+                    return bot.reply_to(message, "❌ You don't have the <b>Manage Administrators</b> permission to demote users. Ask an admin who has it (or the group owner).", parse_mode="HTML")
+                return reply_not_admin(bot, message)
         target = get_target_user(message)
         if not target:
             return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
         t_id = target.id
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
-            return bot.reply_to(message, "⚠️ Cannot demote this user.")
+        # Target-side protection: the bot owner and the group creator can never be demoted.
+        if is_owner(getattr(target, 'username', None)):
+            return bot.reply_to(message, "⚠️ Cannot demote the bot owner.")
+        target_member = None
+        try:
+            target_member = bot.get_chat_member(message.chat.id, t_id)
+        except Exception:
+            pass
+        if target_member is not None and target_member.status == 'creator':
+            return bot.reply_to(message, "⚠️ Cannot demote the group owner.")
+        if target_member is not None and target_member.status != 'administrator':
+            return bot.reply_to(message, "⚠️ This user is not an admin.")
         try:
             bot.promote_chat_member(message.chat.id, t_id,
                 can_change_info=False, can_post_messages=False, can_edit_messages=False,
                 can_delete_messages=False, can_invite_users=False, can_restrict_members=False,
                 can_pin_messages=False, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"⏬ User <b>{name}</b> (<code>{t_id}</code>) has been <b>demoted</b>.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Demote failed: {friendly_error(e)}")
@@ -1709,31 +2349,44 @@ def register_handlers(bot):
         except Exception as e:
             bot.reply_to(message, str(e))
 
-    # ── /report ──
+    # ── /report — reply to a message to notify all admins ──
     @bot.message_handler(commands=['report'])
     def cmd_report(message):
+        _report_notify(bot, message)
+
+    # ── @admin — same as /report (reply with '@admin') ──
+    @bot.message_handler(func=lambda m: bool(getattr(m, 'text', None))
+                                       and (m.text or "").strip().lower().split()[:1] == ["@admin"])
+    def cmd_report_at_admin(message):
+        _report_notify(bot, message)
+
+    # ── /reports on|off — enable/disable user reports ──
+    @bot.message_handler(commands=['reports'])
+    def cmd_reports(message):
         if message.chat.type not in ['group', 'supergroup']:
             return
-        if not message.reply_to_message:
-            return bot.reply_to(message, "Reply to a message to report it to admins.")
-        try:
-            admins = bot.get_chat_administrators(message.chat.id)
-            chat_link_id = abs(message.chat.id) % (10 ** 10)
-            for admin in admins:
-                if not admin.user.is_bot:
-                    try:
-                        bot.send_message(
-                            admin.user.id,
-                            f"🚨 <b>Report from {message.chat.title}</b>\n\n"
-                            f"Reported by: {message.from_user.first_name}\n"
-                            f"Message: <a href='https://t.me/c/{chat_link_id}/{message.reply_to_message.message_id}'>View Message</a>",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-            bot.reply_to(message, "🚨 Admins have been notified.")
-        except Exception:
-            pass
+        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
+        parts = (message.text or "").split(None, 1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+        toggles = {
+            "on": 1, "true": 1, "yes": 1, "enable": 1, "enabled": 1,
+            "off": 0, "false": 0, "no": 0, "disable": 0, "disabled": 0,
+        }
+        group = db.get_group(message.chat.id) or {}
+        current = group.get("reports", 1)
+        if arg in toggles:
+            new_val = toggles[arg]
+            db.update_group_setting(message.chat.id, "reports", new_val)
+            bot.reply_to(message,
+                f"✅ User reports are now <b>{'on' if new_val else 'off'}</b>.",
+                parse_mode="HTML")
+        elif arg in ("", "status"):
+            bot.reply_to(message,
+                f"ℹ️ User reports are currently <b>{'on' if current else 'off'}</b>.\n"
+                "Usage: <code>/reports on</code> or <code>/reports off</code>",
+                parse_mode="HTML")
+        else:
+            return bot.reply_to(message, "Usage: <code>/reports on</code> or <code>/reports off</code>", parse_mode="HTML")
 
     # ── /setwelcome — UPGRADED (reply-to-set: text / photo+caption / GIF+caption) ──
     @bot.message_handler(commands=['setwelcome'])
@@ -1942,29 +2595,6 @@ def register_handlers(bot):
         panel_text, markup = build_captcha_panel(message.chat.id, group)
         bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
     @bot.message_handler(commands=['setcaptchatext'])
     def cmd_setcaptchatext(message):
@@ -2242,443 +2872,36 @@ def register_handlers(bot):
 
     # ── /promote ──
     # ── /promote ──
-    @bot.message_handler(commands=['promote'])
-    def cmd_promote(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        target = get_target_user(message)
-        if not target:
-            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
-        t_id = target.id
-        t_uname = getattr(target, 'username', None)
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, t_uname):
-            return bot.reply_to(message, "⚠️ Cannot promote this user (already an admin or owner protected).")
-        try:
-            bot.promote_chat_member(message.chat.id, t_id,
-                can_change_info=True, can_post_messages=True, can_edit_messages=True,
-                can_delete_messages=True, can_invite_users=True, can_restrict_members=True,
-                can_pin_messages=True, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
-            bot.reply_to(message, f"⏫ User <b>{name}</b> (<code>{t_id}</code>) promoted to <b>Admin</b>!", parse_mode="HTML")
-        except Exception as e:
-            if "RIGHT_FORBIDDEN" in str(e):
-                bot.reply_to(message, "❌ <b>RIGHT_FORBIDDEN</b>\n\nThe bot needs the <b>\"Add new admins\"</b> permission to promote users.\n\n"
-                    "👤 Go to Group Settings → Administrators → select the bot → enable <b>\"Add new admins\"</b>.",
-                    parse_mode="HTML")
-            else:
-                bot.reply_to(message, f"❌ Promote failed: {friendly_error(e)}")
 
     # ── /demote ──
-    @bot.message_handler(commands=['demote'])
-    def cmd_demote(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        target = get_target_user(message)
-        if not target:
-            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
-        t_id = target.id
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
-            return bot.reply_to(message, "⚠️ Cannot demote this user.")
-        try:
-            bot.promote_chat_member(message.chat.id, t_id,
-                can_change_info=False, can_post_messages=False, can_edit_messages=False,
-                can_delete_messages=False, can_invite_users=False, can_restrict_members=False,
-                can_pin_messages=False, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
-            bot.reply_to(message, f"⏬ User <b>{name}</b> (<code>{t_id}</code>) has been <b>demoted</b>.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Demote failed: {friendly_error(e)}")
 
     # ── /pin ──
-    @bot.message_handler(commands=['pin'])
-    def cmd_pin(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        if not message.reply_to_message:
-            return bot.reply_to(message, "Reply to a message to pin it.")
-        try:
-            bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
-            bot.reply_to(message, "📌 Message pinned!")
-        except Exception as e:
-            bot.reply_to(message, str(e))
 
     # ── /unpin ──
-    @bot.message_handler(commands=['unpin'])
-    def cmd_unpin(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.unpin_all_chat_messages(message.chat.id)
-            bot.reply_to(message, "📌 All messages unpinned!")
-        except Exception as e:
-            bot.reply_to(message, str(e))
-
-    # ── /report ──
-    @bot.message_handler(commands=['report'])
-    def cmd_report(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not message.reply_to_message:
-            return bot.reply_to(message, "Reply to a message to report it to admins.")
-        try:
-            admins = bot.get_chat_administrators(message.chat.id)
-            chat_link_id = abs(message.chat.id) % (10 ** 10)
-            for admin in admins:
-                if not admin.user.is_bot:
-                    try:
-                        bot.send_message(
-                            admin.user.id,
-                            f"🚨 <b>Report from {message.chat.title}</b>\n\n"
-                            f"Reported by: {message.from_user.first_name}\n"
-                            f"Message: <a href='https://t.me/c/{chat_link_id}/{message.reply_to_message.message_id}'>View Message</a>",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-            bot.reply_to(message, "🚨 Admins have been notified.")
-        except Exception:
-            pass
 
     # ── /setwelcome — UPGRADED (reply-to-set: text / photo+caption / GIF+caption) ──
-    @bot.message_handler(commands=['setwelcome'])
-    def cmd_setwelcome(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-
-        # ── Reply-based method ──
-        if message.reply_to_message:
-            m = message.reply_to_message
-            if m.photo:
-                file_id = m.photo[-1].file_id
-                caption = m.caption or "Welcome, {name}! 👋"
-                db.update_group_setting(message.chat.id, "welcome_type", "photo")
-                db.update_group_setting(message.chat.id, "welcome_file_id", file_id)
-                db.update_group_setting(message.chat.id, "welcome_message", caption)
-                bot.reply_to(message,
-                    "✅ <b>Welcome image set!</b>\n\n"
-                    "New members will be greeted with your photo + caption.\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-
-            elif m.animation:
-                file_id = m.animation.file_id
-                caption = m.caption or "Welcome, {name}! 👋"
-                db.update_group_setting(message.chat.id, "welcome_type", "gif")
-                db.update_group_setting(message.chat.id, "welcome_file_id", file_id)
-                db.update_group_setting(message.chat.id, "welcome_message", caption)
-                bot.reply_to(message,
-                    "✅ <b>Welcome GIF set!</b>\n\n"
-                    "New members will be greeted with your animated GIF + caption.\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-
-            elif m.text:
-                db.update_group_setting(message.chat.id, "welcome_type", "text")
-                db.update_group_setting(message.chat.id, "welcome_file_id", "")
-                db.update_group_setting(message.chat.id, "welcome_message", m.text)
-                bot.reply_to(message,
-                    "✅ <b>Welcome text set!</b>\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-            else:
-                bot.reply_to(message,
-                    "❌ Unsupported type. Reply to a <b>text</b>, <b>photo+caption</b>, or <b>GIF+caption</b>.",
-                    parse_mode="HTML")
-                return
-
-        # ── Inline text method: /setwelcome <text> ──
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "welcome_type", "text")
-            db.update_group_setting(message.chat.id, "welcome_file_id", "")
-            db.update_group_setting(message.chat.id, "welcome_message", parts[1])
-            bot.reply_to(message,
-                "✅ <b>Welcome message updated!</b>\n<i>Use {name} or {id} to personalize.</i>",
-                parse_mode="HTML")
-        # ── Show current setting ──
-        group_data = db.get_group(message.chat.id)
-        current_msg = group_data.get("welcome_message", "Welcome, {name}! 👋")
-        current_type = group_data.get("welcome_type", "text")
-        
-        bot.reply_to(message,
-            f"💡 <b>Current Welcome Message ({current_type}):</b>\n\n"
-            f"<code>{html.escape(current_msg)}</code>\n\n"
-            "📌 <b>How to set:</b>\n"
-            "1️⃣ <b>Text:</b> <code>/setwelcome Hello {name}!</code>\n"
-            "2️⃣ <b>Image + Caption:</b> Send a photo, then <b>reply</b> with <code>/setwelcome</code>\n"
-            "3️⃣ <b>GIF + Caption:</b> Send a GIF, then <b>reply</b> with <code>/setwelcome</code>\n\n"
-            "📌 <b>Placeholders:</b>\n"
-            "• <code>{name}</code> - Full name\n"
-            "• <code>{username}</code> - @username\n"
-            "• <code>{date}</code> - Today's date\n"
-            "• <code>{group}</code> - Group title\n"
-            "• <code>{id}</code> - User ID",
-            parse_mode="HTML")
 
 
     # ── /setleave ──
-    @bot.message_handler(commands=['setleave'])
-    def cmd_setleave(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-
-        # ── Reply method for photos/GIFs/text ──
-        if message.reply_to_message:
-            m = message.reply_to_message
-            if m.photo:
-                file_id = m.photo[-1].file_id
-                caption = m.caption or "Goodbye, {name}!"
-                db.update_group_setting(message.chat.id, "leave_type", "photo")
-                db.update_group_setting(message.chat.id, "leave_file_id", file_id)
-                db.update_group_setting(message.chat.id, "leave_message", caption)
-                bot.reply_to(message, "✅ <b>Leave photo set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-
-            elif m.animation:
-                file_id = m.animation.file_id
-                caption = m.caption or "Goodbye, {name}!"
-                db.update_group_setting(message.chat.id, "leave_type", "gif")
-                db.update_group_setting(message.chat.id, "leave_file_id", file_id)
-                db.update_group_setting(message.chat.id, "leave_message", caption)
-                bot.reply_to(message, "✅ <b>Leave GIF set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-
-            elif m.text:
-                db.update_group_setting(message.chat.id, "leave_type", "text")
-                db.update_group_setting(message.chat.id, "leave_file_id", "")
-                db.update_group_setting(message.chat.id, "leave_message", m.text)
-                bot.reply_to(message, "✅ <b>Leave text set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-            else:
-                bot.reply_to(message, "❌ Unsupported type. Reply to a <b>text</b>, <b>photo+caption</b>, or <b>GIF+caption</b>.", parse_mode="HTML")
-                return
-
-        # ── Inline text method: /setleave <text> ──
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "leave_type", "text")
-            db.update_group_setting(message.chat.id, "leave_file_id", "")
-            db.update_group_setting(message.chat.id, "leave_message", parts[1])
-            bot.reply_to(message, "✅ <b>Leave message updated!</b>\n<i>Use {name} or {id} to personalize.</i>", parse_mode="HTML")
-        # ── Show current setting ──
-        group_data = db.get_group(message.chat.id)
-        current_msg = group_data.get("leave_message", "Goodbye {name}!")
-        current_type = group_data.get("leave_type", "text")
-
-        bot.reply_to(message,
-            f"💡 <b>Current Leave Message ({current_type}):</b>\n\n"
-            f"<code>{html.escape(current_msg)}</code>\n\n"
-            "📌 <b>How to set:</b>\n"
-            "1️⃣ <b>Text:</b> <code>/setleave Goodbye {name}!</code>\n"
-            "2️⃣ <b>Image + Caption:</b> Send a photo, then <b>reply</b> with <code>/setleave</code>\\n"
-            "3️⃣ <b>GIF + Caption:</b> Send a GIF, then <b>reply</b> with <code>/setleave</code>\\n\\n"
-            "📌 <b>Placeholders:</b>\\n"
-            "• <code>{name}</code> - Full name\\n"
-            "• <code>{username}</code> - @username\\n"
-            "• <code>{date}</code> - Today's date\\n"
-            "• <code>{group}</code> - Group title\\n"
-            "• <code>{id}</code> - User ID",
-            parse_mode="HTML")
 
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchakicktime'])
-    def cmd_captchakicktime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_kick_time", "")
-                bot.reply_to(message, "✅ CAPTCHA kick time disabled.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_kick_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-kick time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captcha'])
-    def cmd_captcha(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower() in ('yes', 'on', 'true', '1')
-            db.update_group_setting(message.chat.id, "captcha", int(val))
-        group = db.get_group(message.chat.id)
-        panel_text, markup = build_captcha_panel(message.chat.id, group)
-        bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['setcaptchatext'])
-    def cmd_setcaptchatext(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "captcha_text", parts[1])
-            bot.reply_to(message, "✅ Custom CAPTCHA text updated.")
-        else:
-            group = db.get_group(message.chat.id)
-            val = group.get("captcha_text", "Click to prove you are human")
-            bot.reply_to(message, f"Current CAPTCHA text is: {val}\nUse /setcaptchatext <text> to change.")
 
-    @bot.message_handler(commands=['resetcaptchatext'])
-    def cmd_resetcaptchatext(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        db.update_group_setting(message.chat.id, "captcha_text", "Click to prove you are human")
-        bot.reply_to(message, "✅ CAPTCHA text reset to default.")
 
     # ── /rules ──
-    @bot.message_handler(commands=['rules'])
-    def cmd_rules(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        group = db.get_group(message.chat.id)
-        if group:
-            bot.reply_to(message, group.get("rules", "No rules set."))
 
     # ── /addfilter ──
-    @bot.message_handler(commands=['addfilter'])
-    def cmd_addfilter(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) < 2:
-            return bot.reply_to(message, "Format: /addfilter <keyword> (reply to media/text)")
-        keyword = parts[1].strip()
-        if not message.reply_to_message:
-            return bot.reply_to(message, "You must reply to the content you want to set as the filter response.")
-        m = message.reply_to_message
-        filter_data = {}
-        if m.text:
-            filter_data = {"type": "text", "text": m.text}
-        elif m.photo:
-            filter_data = {"type": "photo", "file_id": m.photo[-1].file_id, "caption": m.caption or ""}
-        elif m.sticker:
-            filter_data = {"type": "sticker", "file_id": m.sticker.file_id}
-        elif m.animation:
-            filter_data = {"type": "gif", "file_id": m.animation.file_id}
-        else:
-            return bot.reply_to(message, "Unsupported media type.")
-        db.add_filter(message.chat.id, keyword, filter_data)
-        bot.reply_to(message, f"✅ Filter '<code>{keyword}</code>' added!", parse_mode="HTML")
 
     # ── /removefilter ──
-    @bot.message_handler(commands=['removefilter'])
-    def cmd_removefilter(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) < 2:
-            return bot.reply_to(message, "Format: /removefilter <keyword>")
-        db.remove_filter(message.chat.id, parts[1].strip())
-        bot.reply_to(message, f"✅ Filter '<code>{parts[1].strip()}</code>' removed.", parse_mode="HTML")
 
     # ── /filters ──
-    @bot.message_handler(commands=['filters'])
-    def cmd_list_filters(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        group = db.get_group(message.chat.id)
-        if not group or not group.get("filters"):
-            return bot.reply_to(message, "No filters defined for this group.")
-        fts = group["filters"].keys()
-        text = "<b>🔍 Active Group Filters:</b>\n\n" + "\n".join([f"• <code>{f}</code>" for f in fts])
-        bot.reply_to(message, text, parse_mode="HTML")
 
     # ── /lock ──
-    @bot.message_handler(commands=['lock'])
-    def cmd_lock(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.set_chat_permissions(message.chat.id, telebot.types.ChatPermissions(can_send_messages=False))
-            bot.reply_to(message, "🔒 <b>Group Locked!</b> Regular members can no longer send messages.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Lock failed: {friendly_error(e)}")
 
     # ── /unlock ──
-    @bot.message_handler(commands=['unlock'])
-    def cmd_unlock(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.set_chat_permissions(message.chat.id, telebot.types.ChatPermissions(
-                can_send_messages=True, can_send_media_messages=True,
-                can_send_other_messages=True, can_add_web_page_previews=True))
-            bot.reply_to(message, "🔓 <b>Group Unlocked!</b> Regular members can now speak.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Unlock failed: {friendly_error(e)}")
 
     # ── /link ──
     @bot.message_handler(commands=['link'])
@@ -3009,6 +3232,14 @@ def register_handlers(bot):
             telebot.types.BotCommand("mute",         "Restrict user from talking"),
             telebot.types.BotCommand("unmute",       "Restore talking privileges"),
             telebot.types.BotCommand("warn",         "Issue a formal warning"),
+            telebot.types.BotCommand("dwarn",        "Warn + delete user's message"),
+            telebot.types.BotCommand("swarn",        "Silent warning (no reply, no chat message)"),
+            telebot.types.BotCommand("rmwarn",       "Remove the most recent warning"),
+            telebot.types.BotCommand("warnings",     "View warning config (limit, mode, expiry)"),
+            telebot.types.BotCommand("setwarnlimit", "Set the warn limit (1-20)"),
+            telebot.types.BotCommand("setwarnmode",  "Set warn mode (kick/ban/tban/mute/tmute)"),
+            telebot.types.BotCommand("setwarntime",  "Enable warning expiry (e.g. 12w) or off"),
+            telebot.types.BotCommand("warns",        "View a user's warnings with reasons"),
             telebot.types.BotCommand("removewarn",   "Remove 1 warning"),
             telebot.types.BotCommand("resetwarn",    "Clear all warnings"),
             telebot.types.BotCommand("keywordalert", "Toggle keyword alert"),
@@ -3028,8 +3259,11 @@ def register_handlers(bot):
             telebot.types.BotCommand("pin",          "Pin a message"),
             telebot.types.BotCommand("unpin",        "Unpin all messages"),
             telebot.types.BotCommand("del",          "Delete a replied message"),
+            telebot.types.BotCommand("purge",        "Delete all messages from a replied message onward"),
+            telebot.types.BotCommand("spurge",       "Quiet /purge — no confirmation message"),
+            telebot.types.BotCommand("purgefrom",    "Start a ranged purge (reply to oldest message)"),
+            telebot.types.BotCommand("purgeto",      "Finish a ranged purge (reply to newest message)"),
             telebot.types.BotCommand("rules",        "Show group rules"),
-            telebot.types.BotCommand("setrules",     "Set group rules"),
             telebot.types.BotCommand("setwelcome",   "Set welcome (reply to text/photo/GIF)"),
             telebot.types.BotCommand("setleave",     "Set goodbye (reply to text/photo/GIF)"),
             telebot.types.BotCommand("addfilter",    "Add auto-reply filter"),
@@ -3038,6 +3272,7 @@ def register_handlers(bot):
             telebot.types.BotCommand("admins",       "List all group admins"),
             telebot.types.BotCommand("send",         "Bot sends a custom message"),
             telebot.types.BotCommand("report",       "Alert admins about a message"),
+            telebot.types.BotCommand("reports",      "Toggle user reports on/off"),
             telebot.types.BotCommand("id",           "Get User/Chat IDs (for Dashboard)"),
             telebot.types.BotCommand("approve",      "Toggle approve mode on/off"),
             telebot.types.BotCommand("captcha",      "CAPTCHA settings panel for new members"),
@@ -3055,6 +3290,9 @@ def register_handlers(bot):
         bot.set_my_commands(commands)
     except Exception as e:
         logger.error(f"Failed to register commands: {e}")
+
+    # ── Interactive dashboard callbacks (dm:*) ──
+    dashboard_menu.register_dashboard_handlers(bot)
 
     # ── Callback Query Handlers ──
     @bot.callback_query_handler(func=lambda call: call.data.startswith('unban_') or call.data.startswith('unmute_'))
@@ -3089,8 +3327,9 @@ def register_handlers(bot):
         """
         callback_data format:
           captcha_verify:button:<chat_id>:<user_id>
-          captcha_verify:math:<chosen>:<correct>:<chat_id>:<user_id>
-          captcha_verify:text:<chosen>:<correct>:<chat_id>:<user_id>
+          captcha_verify:math:<chosen>:<chat_id>:<user_id>
+          captcha_verify:text:<chosen>:<chat_id>:<user_id>
+        (correct answers are verified server-side from the pending-captcha record)
         """
         parts = call.data.split(":")
         # parts[0] = 'captcha_verify'
@@ -3101,14 +3340,10 @@ def register_handlers(bot):
                 # format: captcha_verify:button:<chat_id>:<user_id>
                 chat_id = int(parts[2])
                 user_id = int(parts[3])
-                passed  = True
             else:
-                # format: captcha_verify:math/text:<chosen>:<correct>:<chat_id>:<user_id>
-                chosen  = parts[2]
-                correct = parts[3]
-                chat_id = int(parts[4])
-                user_id = int(parts[5])
-                passed  = (chosen == correct)
+                # format: captcha_verify:math/text:<chosen>:<chat_id>:<user_id>
+                chat_id = int(parts[3])
+                user_id = int(parts[4])
         except (IndexError, ValueError):
             bot.answer_callback_query(call.id, "❌ Invalid CAPTCHA data.", show_alert=True)
             return
@@ -3118,10 +3353,21 @@ def register_handlers(bot):
             bot.answer_callback_query(call.id, "❌ This CAPTCHA is not for you.", show_alert=True)
             return
 
+        # Verify against the challenge stored in the database — never trust a
+        # correct answer embedded in the callback_data (it is readable from the
+        # message markup). A missing pending record means the challenge was
+        # already resolved or expired.
         pending = db.get_pending_captcha(chat_id, user_id)
         if not pending:
             bot.answer_callback_query(call.id, "❌ CAPTCHA already resolved or expired.", show_alert=True)
             return
+
+        if mode == 'button':
+            passed = True  # button mode: a click is the proof
+        else:
+            expected = str(pending.get('correct_answer', ''))
+            chosen   = parts[2]
+            passed   = (chosen == expected)
 
         if passed:
             group_data   = db.get_group(chat_id)
@@ -3400,6 +3646,9 @@ def register_handlers(bot):
         if message.chat.type not in ['group', 'supergroup']:
             return
 
+        # ── PURGE TRACKING (history used by /purge family) ──
+        _purge_track(message.chat.id, message)
+
         # ── TRACKING SYSTEM (MODERATION MONITORING) ──
         try:
             tracking = db.get_tracking_config()
@@ -3414,7 +3663,7 @@ def register_handlers(bot):
                             fwd = bot.forward_message(chat_id=dest_id_int, from_chat_id=message.chat.id, message_id=message.message_id)
                             info_text = f"👤 <b>User:</b> {message.from_user.first_name} (<code>{message.from_user.id}</code>)\n🏘️ <b>Group:</b> {message.chat.title} (<code>{message.chat.id}</code>)"
                             bot.send_message(dest_id_int, info_text, reply_to_message_id=fwd.message_id, parse_mode="HTML")
-                        except Exception as forward_err:
+                        except Exception:
                             # Fallback to copy_message if forward_message is restricted
                             try:
                                 copy_msg = bot.copy_message(chat_id=dest_id_int, from_chat_id=message.chat.id, message_id=message.message_id)
@@ -3475,25 +3724,16 @@ def register_handlers(bot):
             if len(dq) > _SPAM_MAX:
                 try:
                     bot.delete_message(message.chat.id, message.message_id)
-                    warnings = db.add_warning(message.from_user.id, message.from_user.first_name)
+                    warnings, limit, punished = _auto_warn_limit(bot, message.chat.id, message, message.from_user.first_name, "Flood detected")
                     dq.clear()  # reset counter after action
-                    if warnings >= 3:
-                        bot.ban_chat_member(message.chat.id, message.from_user.id)
-                        db.reset_warnings(message.from_user.id)
-                        bot.send_message(
-                            message.chat.id,
-                            f"⚡ <b>{message.from_user.first_name}</b> was <b>banned</b> for spamming "
-                            f"(3 flood warnings triggered).",
-                            parse_mode="HTML"
-                        )
-                        db.log_event(f"⚡ Spam-ban: {message.from_user.id} in {message.chat.id}")
-                    else:
+                    if not punished:
                         bot.send_message(
                             message.chat.id,
                             f"⚡ <b>{message.from_user.first_name}</b>, slow down! "
-                            f"Flood detected. Warning <b>{warnings}/3</b>",
+                            f"Flood detected. Warning <b>{warnings}/{limit}</b>",
                             parse_mode="HTML"
                         )
+                        db.log_event(f"⚡ Spam-warn: {message.from_user.id} in {message.chat.id} (warn {warnings}/{limit})")
                 except Exception:
                     pass
                 return
@@ -3549,27 +3789,17 @@ def register_handlers(bot):
                         except Exception:
                             pass
                         # Warn the user for sending invite links
-                        warnings = db.add_warning(message.from_user.id, message.from_user.first_name)
                         try:
-                            if warnings >= 3:
-                                bot.ban_chat_member(message.chat.id, message.from_user.id)
-                                db.reset_warnings(message.from_user.id)
-                                bot.send_message(
-                                    message.chat.id,
-                                    f"🚫 <b>{message.from_user.first_name}</b> was <b>banned</b> for repeatedly "
-                                    f"sending Telegram invite links (3 warnings).",
-                                    parse_mode="HTML"
-                                )
-                                db.log_event(f"🔗 Invite link ban: user {message.from_user.id} in {message.chat.id}")
-                            else:
+                            warnings, limit, punished = _auto_warn_limit(bot, message.chat.id, message, message.from_user.first_name, "Sending invite links")
+                            if not punished:
                                 bot.send_message(
                                     message.chat.id,
                                     f"🚫 <b>Anti-Spam</b>: <b>{message.from_user.first_name}</b>, "
                                     f"Telegram invite links are <b>not allowed</b> here. "
-                                    f"Warning <b>{warnings}/3</b>",
+                                    f"Warning <b>{warnings}/{limit}</b>",
                                     parse_mode="HTML"
                                 )
-                                db.log_event(f"🔗 Invite link blocked: user {message.from_user.id} in {message.chat.id} (warn {warnings}/3)")
+                                db.log_event(f"🔗 Invite link blocked: user {message.from_user.id} in {message.chat.id} (warn {warnings}/{limit})")
                         except Exception:
                             pass
                         return
@@ -3583,26 +3813,16 @@ def register_handlers(bot):
                     except Exception:
                         pass
                     # Warn the user for promotional spam
-                    warnings = db.add_warning(message.from_user.id, message.from_user.first_name)
                     try:
-                        if warnings >= 3:
-                            bot.ban_chat_member(message.chat.id, message.from_user.id)
-                            db.reset_warnings(message.from_user.id)
-                            bot.send_message(
-                                message.chat.id,
-                                f"🚫 <b>{message.from_user.first_name}</b> was <b>banned</b> for "
-                                f"promotional spam (3 warnings).",
-                                parse_mode="HTML"
-                            )
-                            db.log_event(f"📊 Promo spam ban: {message.from_user.id} in {message.chat.id}")
-                        else:
+                        warnings, limit, punished = _auto_warn_limit(bot, message.chat.id, message, message.from_user.first_name, reason)
+                        if not punished:
                             bot.send_message(
                                 message.chat.id,
                                 f"🚫 <b>Anti-Spam</b>: <b>{message.from_user.first_name}</b>, {reason}. "
-                                f"Warning <b>{warnings}/3</b>",
+                                f"Warning <b>{warnings}/{limit}</b>",
                                 parse_mode="HTML"
                             )
-                            db.log_event(f"📊 Promo spam blocked: {reason} by {message.from_user.id} (warn {warnings}/3)")
+                            db.log_event(f"📊 Promo spam blocked: {reason} by {message.from_user.id} (warn {warnings}/{limit})")
                     except Exception:
                         pass
                     return
@@ -3622,21 +3842,12 @@ def register_handlers(bot):
                 # Only warn non-admins / non-owners
                 if not user_is_admin and not user_is_owner:
                     try:
-                        warnings = db.add_warning(message.from_user.id, message.from_user.first_name)
-                        if warnings >= 3:
-                            bot.ban_chat_member(message.chat.id, message.from_user.id)
-                            db.reset_warnings(message.from_user.id)
-                            bot.send_message(
-                                message.chat.id,
-                                f"⚠️ <b>{message.from_user.first_name}</b> was <b>banned</b> "
-                                f"for reaching 3 bad-language warnings.",
-                                parse_mode="HTML"
-                            )
-                        else:
+                        warnings, limit, punished = _auto_warn_limit(bot, message.chat.id, message, message.from_user.first_name, f"Bad word: {bw}")
+                        if not punished:
                             bot.send_message(
                                 message.chat.id,
                                 f"⚠️ <b>{message.from_user.first_name}</b>, watch your language! "
-                                f"Warning <b>{warnings}/3</b>",
+                                f"Warning <b>{warnings}/{limit}</b>",
                                 parse_mode="HTML"
                             )
                     except Exception:

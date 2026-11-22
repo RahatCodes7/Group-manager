@@ -151,7 +151,7 @@ class BotManager:
 
                 # ── CAPTCHA: check pending captchas for kick/mute timeouts ──
                 try:
-                    from datetime import datetime, timedelta
+                    from datetime import datetime
                     import re as _re
 
                     def _parse_duration_secs(val):
@@ -165,6 +165,30 @@ class BotManager:
                         conv = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800, 'mn': 2592000, 'y': 31536000}
                         return v * conv.get(u, 0)
 
+                    def _parse_join_time(val):
+                        """Parse join_time from the DB (SQLite or PostgreSQL) into a naive UTC datetime.
+
+                        SQLite stores 'YYYY-MM-DD HH:MM:SS'; PostgreSQL stores timestamps
+                        with fractional seconds and/or a timezone suffix, which strptime
+                        cannot read. Be liberal in what we accept.
+                        """
+                        if not val:
+                            return None
+                        s = str(val).strip()
+                        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+                            try:
+                                return datetime.strptime(s[:19], fmt)
+                            except ValueError:
+                                pass
+                        try:
+                            dt = datetime.fromisoformat(s)
+                            if dt.tzinfo is not None:
+                                from datetime import timezone as _tz
+                                dt = dt.astimezone(_tz.utc).replace(tzinfo=None)
+                            return dt
+                        except Exception:
+                            return None
+
                     pending = db.get_all_pending_captchas()
                     now = datetime.utcnow()
 
@@ -173,10 +197,8 @@ class BotManager:
                             chat_id  = int(pc['chat_id'])
                             user_id  = int(pc['user_id'])
                             # Parse join_time stored as UTC string
-                            join_str = pc.get('join_time', '')
-                            try:
-                                join_time = datetime.strptime(join_str, '%Y-%m-%d %H:%M:%S')
-                            except:
+                            join_time = _parse_join_time(pc.get('join_time', ''))
+                            if join_time is None:
                                 continue
                             elapsed = (now - join_time).total_seconds()
 

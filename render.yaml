@@ -16,7 +16,7 @@ services:
       - key: SUPPORT_CHANNEL
         sync: false          # Optional: support channel username (no @)
       - key: DATABASE_URL
-        sync: false          # PostgreSQL URL (e.g. Neon). Leave unset to use the bundled manager.db (SQLite)
+        sync: false          # ⚠️ REQUIRED — PostgreSQL URL (e.g. Neon). Without it the bot will not work (no SQLite fallback).
       - key: ADMIN_PASSWORD
         sync: false          # Optional: set a password to protect the dashboard (leave unset for open access)
       - key: PUBLIC_URL
