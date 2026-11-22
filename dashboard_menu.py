@@ -8,18 +8,16 @@ Replaces the old static welcome card with a fully interactive dashboard:
   │ 🛡 Group mgmt & moderation    │
   │ 📊 Chat activity & leaderboard │
   │ 🎮 Tic-Tac-Toe                │
-  │ 👥 Users: N   🌐 Groups: N    │
   │ MISS WAGURI 💕                 │
   └──────────────────────────────┘
   [⚙️ Commands] [❓ Help]
   [✨ About] [👨‍💻 Developer]
   [📢 Updates]
-  [🔄 Refresh]
   [➕ Add to Group]
 
 Every inline button is a callback (or a real external link) — nothing is
 decorative. Commands, help pages and About/Developer/Updates are generated
-from the code that actually exists — no invented commands, no fake stats,
+from the code that actually exists — no invented commands,
 no fake release notes.
 """
 
@@ -49,9 +47,6 @@ _DEFAULT_VERSION = ""
 _STYLE_PRIMARY = "primary"
 _STYLE_SUCCESS = "success"
 _STYLE_DANGER = "danger"
-
-_STATS_TTL = 30.0
-_stats_cache = {"data": None, "ts": 0.0, "lock": threading.Lock()}
 
 _CFG_CACHE_TTL = 60.0
 _cfg_cache = {"data": None, "ts": 0.0, "lock": threading.Lock()}
@@ -135,6 +130,58 @@ def _update_channel_url():
     return _cfg("UPDATE_CHANNEL_URL") or _cfg("SUPPORT_CHANNEL")
 
 
+def _support_channel():
+    """Official support channel username (without @) — env wins, DB secondary."""
+    return _cfg("SUPPORT_CHANNEL").lstrip("@")
+
+
+def _main_group_link():
+    """Support group link configured via /setgroup (stored in DB config)."""
+    try:
+        conf = db.get_config()
+        return str(conf.get("main_group_link", "") or "").strip()
+    except Exception:
+        return ""
+
+
+_GROUP_NAME_CACHE = {}
+_GROUP_NAME_LOCK = threading.Lock()
+_GROUP_NAME_TTL = 300.0
+
+
+def _main_group_name(bot, link):
+    """Best-effort resolution of the support group's real title.
+
+    Falls back to the link slug (never invented) when Telegram can't be
+    reached or the link is an invite link. Cached briefly.
+    """
+    if not link:
+        return ""
+    now = time.time()
+    with _GROUP_NAME_LOCK:
+        entry = _GROUP_NAME_CACHE.get(link)
+        if entry and now - entry[1] < _GROUP_NAME_TTL:
+            return entry[0]
+    name = ""
+    try:
+        m = re.match(r"https?://t\.me/([A-Za-z][A-Za-z0-9_\d\.]+)", link.strip())
+        slug = m.group(1) if m else ""
+        if slug:
+            try:
+                chat = bot.get_chat("@" + slug)
+                name = (getattr(chat, "title", "") or "").strip()
+            except Exception:
+                name = ""
+        if not name and slug:
+            name = slug  # honest fallback — the slug from the link, nothing fabricated
+    except Exception:
+        name = ""
+    name = name or link
+    with _GROUP_NAME_LOCK:
+        _GROUP_NAME_CACHE[link] = (name, now)
+    return name
+
+
 def _github_url():
     return _cfg("GITHUB_URL")
 
@@ -153,30 +200,6 @@ def _is_bot_running():
         return bool(db.get_config().get("is_running", False))
     except Exception:
         return False
-
-
-def _get_stats():
-    now = time.time()
-    with _stats_cache["lock"]:
-        if _stats_cache["data"] and (now - _stats_cache["ts"]) < _STATS_TTL:
-            return _stats_cache["data"]
-        try:
-            stats = db.get_all_stats() or {}
-        except Exception:
-            stats = {}
-        data = {
-            "total_users": int(stats.get("total_users", 0) or 0),
-            "total_groups": int(stats.get("total_groups", 0) or 0),
-        }
-        _stats_cache["data"] = data
-        _stats_cache["ts"] = now
-        return data
-
-
-def refresh_stats_cache():
-    with _stats_cache["lock"]:
-        _stats_cache["data"] = None
-        _stats_cache["ts"] = 0.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -629,15 +652,13 @@ def _markup_buttons(rows):
     return markup
 
 
-def _nav_buttons(parent=None, main=True, refresh=False):
-    """Back + Main Menu row (+ optional Refresh) for sub-pages."""
+def _nav_buttons(parent=None, main=True):
+    """Back + Main Menu row for sub-pages."""
     rows = []
     back_row = []
     if parent:
         back_row.append(_btn("⬅️ Back", f"dm:back:{parent}", style=_STYLE_PRIMARY))
     back_row.append(_btn("🏠 Main Menu", "dm:main", style=_STYLE_PRIMARY))
-    if refresh:
-        back_row.append(_btn("🔄 Refresh", "dm:refresh", style=_STYLE_PRIMARY))
     rows.append(back_row)
     return rows
 
@@ -647,7 +668,6 @@ def _nav_buttons(parent=None, main=True, refresh=False):
 # ─────────────────────────────────────────────────────────────
 
 def build_main_menu_text(first_name="there"):
-    stats = _get_stats()
     bot_name = _bot_name()
     version = _bot_version()
     first = html.escape(str(first_name or "there"))
@@ -660,8 +680,6 @@ def build_main_menu_text(first_name="there"):
         f"📊 Chat activity &amp; leaderboard\n"
         f"🎮 Tic-Tac-Toe\n"
         f"⚙️ Advanced administration tools\n\n"
-        f"👥 <b>Users:</b> {stats['total_users']}\n"
-        f"🌐 <b>Groups:</b> {stats['total_groups']}\n\n"
         f"✨ <b>{html.escape(bot_name)}</b> 💕{f' v{html.escape(version)}' if version else ''}"
     )
     return text
@@ -679,7 +697,6 @@ def build_main_menu_markup(bot):
             _btn("👨‍💻 Developer", "dm:dev", style=_STYLE_PRIMARY),
         ],
         [_btn("📢 Updates", "dm:updates", style=_STYLE_PRIMARY)],
-        [_btn("🔄 Refresh Stats", "dm:refresh", style=_STYLE_PRIMARY)],
     ]
     if username:
         rows.append([
@@ -690,14 +707,6 @@ def build_main_menu_markup(bot):
             )
         ])
     return _markup_buttons(rows)
-
-
-def _stats_text():
-    stats = _get_stats()
-    return (
-        f"👥 Users: <b>{stats['total_users']}</b>\n"
-        f"🌐 Groups: <b>{stats['total_groups']}</b>"
-    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -854,11 +863,11 @@ _HELP_CATEGORIES = [
     ("trouble", "🔧 Troubleshooting",
      "• The dashboard is empty — restart the bot and check the deployment logs.\n"
      "• The bot doesn't respond — check BOT_TOKEN and that the bot has the needed rights.\n"
-     "• Stats look stale — press 🔄 Refresh Stats.\n"
      "• Category buttons don't open — the dashboard may have been restarted; run /start again."),
     ("faq", "❓ FAQ",
      "Q: Can I see the bot's statistics?\n"
-     "A: Yes — the main dashboard shows live Users and Groups from PostgreSQL.\n\n"
+     "A: Yes — per-group chat activity and the Live Leaderboard are available on the dashboard;\n"
+     "   /mystats and /chatstats show per-group numbers (registered users and groups are never shown as a global count).\n\n"
      "Q: Are my settings saved?\n"
      "A: Yes — group settings and scores persist in PostgreSQL.\n\n"
      "Q: Do commands work for everyone?\n"
@@ -927,7 +936,7 @@ def _about_text(bot):
         "📊 Chat activity &amp; leaderboard",
         "🎮 Tic-Tac-Toe",
         "🤖 Auto-moderation, CAPTCHA &amp; auto-reply filters",
-        "📈 Live PostgreSQL-backed statistics",
+        "📈 Per-group chat activity &amp; leaderboards",
     ]
     lines = [
         f"<b>ℹ️ ABOUT {html.escape(name)}</b>",
@@ -966,7 +975,8 @@ def _developer_text(bot):
     username = _developer_username()
     url = _developer_url()
     support = _support_url()
-    support_channel = _cfg("SUPPORT_CHANNEL")
+    support_channel = _support_channel()
+    main_group_link = _main_group_link()
     github = _github_url()
     other = _other_projects()
 
@@ -983,7 +993,10 @@ def _developer_text(bot):
     if support:
         lines.append(f"💬 <b>Support contact:</b> {html.escape(support)}")
     if support_channel:
-        lines.append(f"📢 <b>Support group:</b> https://t.me/{html.escape(support_channel.lstrip('@'))}")
+        lines.append(f"📢 <b>Support channel:</b> @{html.escape(support_channel)} — https://t.me/{html.escape(support_channel)}")
+    if main_group_link:
+        group_name = _main_group_name(bot, main_group_link)
+        lines.append(f"👥 <b>Support group:</b> {html.escape(group_name)} — {html.escape(main_group_link)}")
     if github:
         lines.append(f"🐙 <b>GitHub:</b> {html.escape(github)}")
     if other:
@@ -991,7 +1004,8 @@ def _developer_text(bot):
     if len(lines) <= 2:
         lines.append("ℹ️ No developer information configured yet.")
         lines.append("   Set DEVELOPER_NAME, DEVELOPER_USERNAME, DEVELOPER_URL, SUPPORT_URL,")
-        lines.append("   SUPPORT_CHANNEL, GITHUB_URL and OTHER_PROJECTS env vars to display it here.")
+        lines.append("   SUPPORT_CHANNEL, GITHUB_URL and OTHER_PROJECTS env vars — and /setgroup for the")
+        lines.append("   support group — to display it here.")
     else:
         lines.append("")
         lines.append("<i>Only configured destinations are shown as links.</i>")
@@ -1003,7 +1017,8 @@ def _developer_markup(bot):
     url = _developer_url()
     username = _developer_username()
     support = _support_url()
-    support_channel = _cfg("SUPPORT_CHANNEL")
+    support_channel = _support_channel()
+    main_group_link = _main_group_link()
     github = _github_url()
     if url:
         rows.append([InlineKeyboardButton("🔗 Open profile", url=url, style=_STYLE_PRIMARY)])
@@ -1011,8 +1026,10 @@ def _developer_markup(bot):
         rows.append([InlineKeyboardButton("👤 Open @" + username, url=f"https://t.me/{username}", style=_STYLE_PRIMARY)])
     if support:
         rows.append([InlineKeyboardButton("💬 Support contact", url=support, style=_STYLE_PRIMARY)])
-    elif support_channel:
-        rows.append([InlineKeyboardButton("📢 Support group", url=f"https://t.me/{support_channel.lstrip('@')}", style=_STYLE_PRIMARY)])
+    if support_channel:
+        rows.append([InlineKeyboardButton("📢 Support Channel", url=f"https://t.me/{support_channel}", style=_STYLE_PRIMARY)])
+    if main_group_link:
+        rows.append([InlineKeyboardButton("👥 Support Group", url=main_group_link, style=_STYLE_PRIMARY)])
     if github:
         rows.append([InlineKeyboardButton("🐙 GitHub repository", url=github, style=_STYLE_PRIMARY)])
     rows += _nav_buttons(parent="main", main=True)
@@ -1185,18 +1202,6 @@ def register_dashboard_handlers(bot):
         try:
             parts = (call.data or "").split(":", 2)
             action = parts[1] if len(parts) >= 2 else ""
-
-            # Refresh statistics
-            if action == "refresh":
-                refresh_stats_cache()
-                try:
-                    bot.answer_callback_query(call.id, "🔄 Stats refreshed", show_alert=False)
-                except Exception:
-                    pass
-                _answer_and_edit(bot, call, build_main_menu_text(
-                    getattr(call.from_user, "first_name", "there")),
-                    _main_menu_markup(bot))
-                return
 
             # Commands index
             if action == "commands":
