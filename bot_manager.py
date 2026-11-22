@@ -18,8 +18,10 @@ class BotManager:
 
     def start_bot(self):
         config = db.get_config()
-        # Read token from env first, then fall back to DB
-        token = os.environ.get("BOT_TOKEN", "").strip() or config.get("bot_token", "").strip()
+        # The database is the runtime source of truth (seeded from the env
+        # on first boot), so a Save & Apply in the dashboard takes effect on
+        # restart — the env var is only a fallback for a fresh install.
+        token = config.get("bot_token", "").strip() or os.environ.get("BOT_TOKEN", "").strip()
         is_running = config.get("is_running", False)
 
         if not token:

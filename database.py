@@ -684,16 +684,20 @@ class Database:
                         except:
                             conf[row['key']] = row['value']
 
-                    # Environment variable overrides (if set)
+                    # Environment variables seed the config ONLY when the DB
+                    # has nothing (fresh deploy / first run). Once values exist
+                    # in the database — e.g. after the dashboard's Save & Apply
+                    # button — the database is the runtime source of truth, so
+                    # changes apply dynamically without an env edit.
                     env_token   = os.getenv('BOT_TOKEN')
                     env_owner   = os.getenv('OWNER_USERNAME')
                     env_running = os.getenv('IS_RUNNING')
                     env_support = os.getenv('SUPPORT_CHANNEL')
 
-                    if env_token: conf["bot_token"] = env_token
-                    if env_owner: conf["owner_username"] = env_owner.replace("@", "")
-                    if env_running and env_running.lower() in ("1", "true", "yes"): conf["is_running"] = True
-                    if env_support: conf["support_channel"] = env_support.replace("@", "")
+                    if env_token and not conf.get("bot_token", "").strip(): conf["bot_token"] = env_token
+                    if env_owner and not conf.get("owner_username", "").strip(): conf["owner_username"] = env_owner.replace("@", "")
+                    if env_running and env_running.lower() in ("1", "true", "yes") and not conf.get("is_running"): conf["is_running"] = True
+                    if env_support and not conf.get("support_channel", "").strip(): conf["support_channel"] = env_support.replace("@", "")
 
                     _config_cache.set("config", conf)
                     return conf

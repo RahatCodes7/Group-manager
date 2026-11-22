@@ -69,17 +69,21 @@ def _is_duplicate_callback(call_id):
 
 
 def _cfg(key, default=""):
+    """DB-first config — the database is the runtime source of truth (the owner
+    changes it via the dashboard's Save & Apply). Env vars are the first-boot
+    seed only (seeded into the DB at startup); they apply as a fallback when
+    the database has nothing."""
     env_val = os.getenv(key, "").strip()
-    if env_val:
-        return env_val
     try:
         conf = db.get_config()
         val = conf.get(key.lower(), "") if isinstance(conf, dict) else ""
-        if val is None or not str(val).strip():
-            return default
-        return str(val).strip()
+        if val is not None and str(val).strip():
+            return str(val).strip()
     except Exception:
-        return default
+        pass
+    if env_val:
+        return env_val
+    return default
 
 
 def _bot_name():
@@ -131,7 +135,7 @@ def _update_channel_url():
 
 
 def _support_channel():
-    """Official support channel username (without @) — env wins, DB secondary."""
+    """Official support channel username (without @) — DB-first, env seed for first boot."""
     return _cfg("SUPPORT_CHANNEL").lstrip("@")
 
 
@@ -992,8 +996,6 @@ def _developer_text(bot):
         lines.append(f"🔗 <b>Profile:</b> {html.escape(url)}")
     if support:
         lines.append(f"💬 <b>Support contact:</b> {html.escape(support)}")
-    if support_channel:
-        lines.append(f"📢 <b>Support channel:</b> @{html.escape(support_channel)} — https://t.me/{html.escape(support_channel)}")
     if main_group_link:
         group_name = _main_group_name(bot, main_group_link)
         lines.append(f"👥 <b>Support group:</b> {html.escape(group_name)} — {html.escape(main_group_link)}")
@@ -1001,7 +1003,7 @@ def _developer_text(bot):
         lines.append(f"🐙 <b>GitHub:</b> {html.escape(github)}")
     if other:
         lines.append(f"🚀 <b>Other projects:</b> {html.escape(other)}")
-    if len(lines) <= 2:
+    if len(lines) <= 2 and not support_channel:
         lines.append("ℹ️ No developer information configured yet.")
         lines.append("   Set DEVELOPER_NAME, DEVELOPER_USERNAME, DEVELOPER_URL, SUPPORT_URL,")
         lines.append("   SUPPORT_CHANNEL, GITHUB_URL and OTHER_PROJECTS env vars — and /setgroup for the")
