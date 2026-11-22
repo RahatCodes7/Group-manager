@@ -1,15 +1,47 @@
+# Version control
 .git/
+.gitignore
+
+# Python artifacts / caches (never sent to the build daemon)
 __pycache__/
 *.pyc
 *.pyo
-*.bak
-*.log
-.env
-*.sqlite
-*.sqlite3
-docker-compose*
-.dockerignore
-Dockerfile
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Docs & deploy manifests (not needed inside the image)
 README.md
 DEPLOY_GUIDE.md
 render.yaml
+Procfile
+.env.example
+
+# Secrets & environment — NEVER bake into the image
+.env
+.env.*
+*.env
+
+# Database artifacts (PostgreSQL-only; never ship local files)
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.bak
+*.corrupt.bak
+
+# Logs & temp
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Docker self-references (keep the build context lean)
+.dockerignore
+Dockerfile
+docker-compose*

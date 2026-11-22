@@ -1,9 +1,12 @@
-# Secrets & environment
+# Secrets & environment — NEVER commit credentials
+# (.env.example is the documented template — it must stay committable)
 .env
 .env.*
 *.env
+!.env.example
 
-# Database transient files (main manager.db IS tracked - needed for hosting)
+# Database transient files (SQLite is no longer used — stray artifacts must not be committed)
+*.db
 *.db-shm
 *.db-wal
 *.db.corrupt.bak

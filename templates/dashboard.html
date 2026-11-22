@@ -146,6 +146,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
     <button class="nav-item" onclick="showSection('users')" id="nav-users"><span class="nav-icon">👥</span>Users</button>
     <button class="nav-item" onclick="showSection('groups')" id="nav-groups"><span class="nav-icon">🏘️</span>Groups</button>
     <button class="nav-item" onclick="showSection('leaderboard')" id="nav-leaderboard"><span class="nav-icon">🏆</span>Leaderboard</button>
+    <button class="nav-item" onclick="showSection('sync')" id="nav-sync"><span class="nav-icon">🔄</span>Group Synch.</button>
 
     <div class="nav-section">Control</div>
     <button class="nav-item" onclick="showSection('tools')" id="nav-tools"><span class="nav-icon">🛠️</span>Remote Tools</button>
@@ -188,9 +189,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
           <div class="page-subtitle">Live intelligence — auto-refreshes every 30s</div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <a href="/api/download_database" class="btn btn-ghost" title="Download manager.db">📥 .db</a>
-          <a href="/api/download_database?ext=shm" class="btn btn-ghost" title="Download manager.db-shm">📥 .db-shm</a>
-          <a href="/api/download_database?ext=wal" class="btn btn-ghost" title="Download manager.db-wal">📥 .db-wal</a>
+          <span class="badge badge-muted" title="PostgreSQL-only — use pg_dump/psql for backups">🗃️ PG-only (pg_dump/psql)</span>
           <form action="/api/sync_data" method="POST" style="margin:0;">
             <button type="submit" class="btn btn-ghost">🧠 Sync Intelligence</button>
           </form>
@@ -450,6 +449,76 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
     </section>
 
     <!-- ── LIVE LEADERBOARD ── -->
+    <!-- ── GROUP SYNCHRONIZATION ── -->
+    <section class="section" id="section-sync">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Group Synchronization</div>
+          <div class="page-subtitle">Registration &amp; member sync for the groups the bot knows — no fabricated counts</div>
+        </div>
+        <button class="btn btn-ghost" onclick="refreshSync()">🔄 Refresh</button>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card c-cyan"><div class="s-icon">👥</div><div class="s-val" id="sync-total-users">—</div><div class="s-lbl">Registered Users</div></div>
+        <div class="stat-card"><div class="s-icon">🏘️</div><div class="s-val" id="sync-total-groups">—</div><div class="s-lbl">Registered Groups</div></div>
+        <div class="stat-card c-green"><div class="s-icon">🔗</div><div class="s-val" id="sync-total-memberships">—</div><div class="s-lbl">Known Memberships</div></div>
+        <div class="stat-card c-yellow"><div class="s-icon">⏳</div><div class="s-val" id="sync-active-jobs">—</div><div class="s-lbl">Currently Syncing</div></div>
+        <div class="stat-card c-green"><div class="s-icon">✅</div><div class="s-val" id="sync-success-jobs">—</div><div class="s-lbl">Successfully Synced</div></div>
+        <div class="stat-card c-red"><div class="s-icon">⚠️</div><div class="s-val" id="sync-failed-jobs">—</div><div class="s-lbl">Failed / Interrupted</div></div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:22px;">
+        <div class="card">
+          <div class="card-header"><div class="card-title">⏱️ Last Sync</div></div>
+          <div class="info-row">
+            <div><div class="info-label">Last successful sync</div></div>
+            <div id="sync-last-at" style="font-weight:600;">—</div>
+          </div>
+          <div class="info-row">
+            <div><div class="info-label">Currently syncing</div></div>
+            <div id="sync-active-list" style="font-size:0.82rem;">—</div>
+          </div>
+          <div class="info-row">
+            <div><div class="info-label">Counts shown are what the bot registered — never a fake full-group import</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div class="card-title">▶️ Run Sync Now</div></div>
+          <form action="/api/sync_group" method="POST">
+            <div class="form-group">
+              <label>Group to sync</label>
+              <select name="chat_id" id="syncChatSelect">
+                <option value="">-- Choose a group --</option>
+                {% for gid, g in groups.items() %}
+                  <option value="{{ gid }}">{{ g.name or 'Group' }} ({{ gid }})</option>
+                {% endfor %}
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary btn-full">🔄 Sync This Group</button>
+          </form>
+          <p style="margin-top:10px;font-size:0.78rem;color:var(--text-muted);line-height:1.5;">
+            Queues a background sync for this group. High-speed: one bulk upsert for members, no per-member queries.
+            Telegram cannot enumerate all members — only members revealed by join/leave events are tracked.
+            Members API (getChatAdministrators / getChatMemberCount) is used only for best-effort counts.
+          </p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title">📜 Recent Sync Jobs</div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Group</th><th>Status</th><th>Known Members</th><th>API Count</th><th>When</th></tr></thead>
+            <tbody id="sync-jobs-table">
+              <tr><td colspan="6" class="empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="section" id="section-leaderboard">
       <div class="page-header">
         <div><div class="page-title">Live Leaderboard</div><div class="page-subtitle">Real-time chat activity rankings per group — Overall / Today / Week</div></div>
@@ -1094,6 +1163,7 @@ function showSection(name){
   if(sec)sec.classList.add('active');
   if(nav)nav.classList.add('active');
   if(name === 'moderation') refreshModerations();
+  if(name === 'sync') refreshSync();
 }
 
 // ── LIVE STATS ──
@@ -1106,6 +1176,50 @@ async function refreshStats(){
     set('stat-badwords',d.total_bad_words);set('stat-warned',d.total_warned_users||0);
     const sb=document.getElementById('sidebarStatus');
     if(sb)sb.innerHTML=d.is_running?'<span class="status-dot online"></span>System Online':'<span class="status-dot offline"></span>System Offline';
+  }catch(e){}
+}
+
+// ── GROUP SYNC ──
+async function refreshSync(){
+  try{
+    const d = await (await fetch('/api/sync_status')).json();
+    const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+    set('sync-total-users', d.total_users ?? 0);
+    set('sync-total-groups', d.total_groups ?? 0);
+    set('sync-total-memberships', d.total_memberships ?? 0);
+    set('sync-active-jobs', d.active_jobs ?? 0);
+    set('sync-success-jobs', d.success_jobs ?? 0);
+    set('sync-failed-jobs', d.failed_jobs ?? 0);
+    set('sync-last-at', d.last_sync_at || 'Never');
+
+    const activeEl = document.getElementById('sync-active-list');
+    if(activeEl){
+      if(d.active_groups && d.active_groups.length){
+        activeEl.innerHTML = d.active_groups.map(j =>
+          `<span class="badge badge-cyan">${j.chat_id} ${j.status}</span>`
+        ).join(' ');
+      }else{
+        activeEl.textContent = 'None';
+      }
+    }
+
+    const body = document.getElementById('sync-jobs-table');
+    if(body){
+      if(!d.recent_jobs || !d.recent_jobs.length){
+        body.innerHTML = '<tr><td colspan="6" class="empty">No sync jobs yet — point a sync at a group to run one.</td></tr>';
+      }else{
+        body.innerHTML = d.recent_jobs.map(j => {
+          const badge = j.status==='success' ? 'badge-success'
+                     : j.status==='running'||j.status==='pending' ? 'badge-cyan'
+                     : j.status==='failed'||j.status==='interrupted' ? 'badge-danger':'badge-muted';
+          const when = (j.created_at||'').slice(0,19).replace('T',' ');
+          const mem = j.members_synced != null ? j.members_synced : '—';
+          const api = j.members_total != null ? j.members_total : '—';
+          const errCell = j.error ? `<br><small style="color:#fb7185;">${j.error}</small>` : '';
+          return `<tr><td>#${j.id}</td><td><code>${j.chat_id}</code></td><td><span class="badge ${badge}">${j.status}</span>${errCell}</td><td>${mem}</td><td>${api}</td><td>${when}</td></tr>`;
+        }).join('');
+      }
+    }
   }catch(e){}
 }
 
@@ -1685,6 +1799,7 @@ function openLeaderboardImage(){
 // ── POLLING ──
 setInterval(refreshStats,30000);
 setInterval(refreshLogs,30000);
+setInterval(refreshSync,15000);
 
 // ── HASH ROUTING ──
 if(location.hash){
