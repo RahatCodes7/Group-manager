@@ -54,7 +54,7 @@ def _row_to_dict(cur, row):
     except Exception:
         return None
     try:
-        return dict(zip(cols, list(row)))
+        return dict(zip(cols, list(row), strict=False))
     except Exception:
         return None
 

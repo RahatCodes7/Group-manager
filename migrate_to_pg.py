@@ -29,7 +29,7 @@ TABLES = [
 ]
 
 def column_names(cur, table):
-    cur.execute(f'SELECT column_name FROM information_schema.columns WHERE table_name=%s ORDER BY ordinal_position', (table,))
+    cur.execute('SELECT column_name FROM information_schema.columns WHERE table_name=%s ORDER BY ordinal_position', (table,))
     return [r["column_name"] for r in cur.fetchall()]
 
 def main():
@@ -71,7 +71,7 @@ def main():
                 pg.commit()
                 count += len(batch)
                 print(f"  {table}: +{count} / {len(rows)}", flush=True)
-            except Exception as e:
+            except Exception:
                 pg.rollback()
                 # Fall back to row-by-row so a single bad row isn't fatal
                 for row in chunk:

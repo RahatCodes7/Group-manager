@@ -688,7 +688,7 @@ def generate_leaderboard_image(entries, mode_label="OVERALL", group_title="", to
     try:
         from PIL import Image, ImageDraw
     except Exception as e:
-        raise RuntimeError(f"Pillow is not available: {e}")
+        raise RuntimeError(f"Pillow is not available: {e}") from e
 
     top_entries = sorted(
         (e for e in (entries or []) if int(e.get("total_messages") or 0) > 0),
@@ -722,12 +722,9 @@ def generate_leaderboard_image(entries, mode_label="OVERALL", group_title="", to
 
     # ── fonts ──
     title_font = _get_font(66, bold=True)
-    brand_font = _get_font(19, bold=True)
-    mode_font = _get_font(22, bold=True)
     chip_font = _get_font(16, bold=True)
     col_font = _get_font(17, bold=True)
     rank_font = _get_font(24, bold=True)
-    name_font = _get_font(26, bold=True)
     cnt_font = _get_font(23, bold=True)
     foot_font = _get_font(21, bold=True)
 

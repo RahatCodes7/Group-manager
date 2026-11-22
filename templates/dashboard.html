@@ -1661,10 +1661,15 @@ async function loadLeaderboard(){
     pagination.innerHTML = pagHtml;
     // Show image button
     imgBtn.style.display = d.entries.length>0 ? '' : 'none';
-    // Auto-load image preview
+    // Auto-load image preview (only when there is data to render)
     const imgEl = document.getElementById('lbImage');
-    imgEl.src = `/api/rankings/image?chat_id=${encodeURIComponent(gid)}&mode=${currentLbMode}&t=${Date.now()}`;
-    imgCard.style.display = 'block';
+    if(d.entries.length>0){
+      imgEl.src = `/api/rankings/image?chat_id=${encodeURIComponent(gid)}&mode=${currentLbMode}&t=${Date.now()}`;
+      imgCard.style.display = 'block';
+    } else {
+      imgEl.removeAttribute('src');
+      imgCard.style.display = 'none';
+    }
   } catch(e){
     tbody.innerHTML = '<tr><td colspan="4" class="empty">Failed to load</td></tr>';
   }

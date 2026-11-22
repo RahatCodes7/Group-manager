@@ -5,7 +5,6 @@ import json
 import threading
 import time as _time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 # Load .env so DATABASE_URL is picked up even when running the bot standalone
 try:
@@ -1596,7 +1595,7 @@ g.lock_sticker, g.lock_animation, g.lock_media, g.lock_url,
                     FROM groups g ORDER BY g.last_active DESC
                 """)
                 return {row['chat_id']: dict(row) for row in c.fetchall()}
-            except Exception as e:
+            except Exception:
                 # Fallback for DBs not yet migrated (old columns missing)
                 try:
                     c = self.conn.cursor()

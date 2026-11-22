@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Form, Response, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, Request, Form, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -32,6 +32,32 @@ def _is_admin_authenticated(request: Request) -> bool:
     token = request.cookies.get("admin_auth", "")
     expected = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
     return token == expected
+
+
+# Paths that must stay publicly reachable (public leaderboard + health probes).
+# Everything else under /api/ and on the dashboard itself requires admin auth
+# when ADMIN_PASSWORD is set.
+PUBLIC_PATHS = {
+    "/health", "/ping",
+    "/login", "/logout",
+    "/leaderboard", "/lb",
+    "/api/rankings/image",  # embedded in the public leaderboard page
+}
+
+
+def _admin_guard(request: Request):
+    """Returns a response (401/redirect) when auth is required and fails, else None."""
+    if not ADMIN_PASSWORD:
+        return None
+    path = request.url.path.rstrip("/") or "/"
+    if path in PUBLIC_PATHS:
+        return None
+    if _is_admin_authenticated(request):
+        return None
+    # Public HTML dashboard -> redirect to login; data/API -> 401 JSON
+    if request.headers.get("accept", "").startswith("text/html"):
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -101,6 +127,19 @@ app = FastAPI(lifespan=lifespan, title="GroupBot Dashboard", version="8.0")
 
 os.makedirs("templates", exist_ok=True)
 templates = Jinja2Templates(directory="templates")
+
+
+@app.middleware("http")
+async def admin_auth_middleware(request: Request, call_next):
+    """Require the dashboard password for everything except public paths.
+
+    Public paths: health/ping probes, login, the public leaderboard and its
+    image endpoint (the leaderboard page is intentionally public).
+    """
+    guard = _admin_guard(request)
+    if guard is not None:
+        return guard
+    return await call_next(request)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -186,7 +225,7 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
     groups = db.get_all_groups()
     # No chat_id -> show group picker
     if not chat_id:
-        html = """
+        page_html = """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
         <title>Leaderboard — Pick a Group</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
@@ -195,11 +234,14 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
         """
         for gid, g in groups.items():
             name = g.get("name") or "Unknown Group"
-            html += f'<div class="g"><span>{name} <code>{gid}</code></span><a href="/leaderboard?chat_id={gid}&mode=overall">View →</a></div>'
+            # Escape everything interpolated into raw HTML (group names are user-controlled)
+            safe_name = html.escape(str(name))
+            safe_gid = html.escape(str(gid), quote=True)
+            page_html += f'<div class="g"><span>{safe_name} <code>{safe_gid}</code></span><a href="/leaderboard?chat_id={safe_gid}&mode=overall">View →</a></div>'
         if not groups:
-            html += '<p style="color:#64748b;">No groups yet</p>'
-        html += '</div></body></html>'
-        return HTMLResponse(html)
+            page_html += '<p style="color:#64748b;">No groups yet</p>'
+        page_html += '</div></body></html>'
+        return HTMLResponse(page_html)
     # Fetch data for given chat_id
     try:
         ref_key = None
@@ -215,7 +257,9 @@ async def leaderboard_public(request: Request, chat_id: Optional[str] = None, mo
         g = db.get_group(chat_id)
         group_name = g.get("name", "") if g else ""
         max_msg = max((e.get("total_messages", 0) for e in entries), default=0) or 1
-        image_url = f"/api/rankings/image?chat_id={chat_id}&mode={mode}"
+        # Only offer the image when there is data to render — otherwise the
+        # image endpoint 404s and the page shows a broken image.
+        image_url = f"/api/rankings/image?chat_id={chat_id}&mode={mode}" if entries else None
         context = {
             "request": request,
             "chat_id": chat_id,

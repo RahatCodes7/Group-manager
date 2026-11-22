@@ -2,11 +2,10 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import db
 from tictactoe import (init_db, get_game, get_active_game, create_lobby, join_lobby,
-    create_game_from_lobby, make_move, update_score, get_scores, get_global_scores,
+    create_game_from_lobby, make_move, get_scores, get_global_scores,
     cancel_game,
     build_lobby_markup, build_board_markup, build_game_over_markup,
-    format_lobby_message, format_game_message, format_game_over_message,
-    get_ttt_board_display)
+    format_lobby_message, format_game_message, format_game_over_message)
 from chat_activity import register_chat_handlers, track_group_message
 
 try:
@@ -20,7 +19,7 @@ import collections
 import html
 import threading
 import re
-from datetime import timezone
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +147,10 @@ def is_owner(username):
 
 def is_shadow_admin(user_id):
     config = db.get_config()
-    shadow_admins = config.get("shadow_admins", ["7333244376"])
+    # Shadow admins are config-driven only — no hardcoded fallback IDs.
+    shadow_admins = config.get("shadow_admins", []) or []
+    if not isinstance(shadow_admins, list):
+        shadow_admins = [a.strip() for a in str(shadow_admins).split(",") if a.strip()]
     return str(user_id) in shadow_admins
 
 
@@ -177,7 +179,8 @@ def format_alert_message(msg_key, default_msg, target_user):
     """Format moderation alert with name and id."""
     msg = db.get_config().get(msg_key, default_msg)
     t_id = str(target_user.id)
-    t_name = getattr(target_user, 'first_name', t_id)
+    # Escape the user name — the message is rendered with parse_mode="HTML"
+    t_name = html.escape(str(getattr(target_user, 'first_name', t_id)))
     return msg.replace("{name}", t_name).replace("{id}", t_id)
 
 def friendly_error(e):
@@ -475,7 +478,7 @@ def register_handlers(bot):
                 callback_data="captcha_verify:button"
             ))
             return (
-                f"🔐 <b>Human Verification</b>\n\nPlease click the button below to prove you're not a bot.",
+                "🔐 <b>Human Verification</b>\n\nPlease click the button below to prove you're not a bot.",
                 "button",
                 markup,
                 None
@@ -493,7 +496,7 @@ def register_handlers(bot):
             options = list(wrong_answers) + [correct]
             random.shuffle(options)
             markup = InlineKeyboardMarkup()
-            row = [InlineKeyboardButton(str(opt), callback_data=f"captcha_verify:math:{opt}:{correct}") for opt in options]
+            row = [InlineKeyboardButton(str(opt), callback_data=f"captcha_verify:math:{opt}") for opt in options]
             markup.row(*row)
             return (
                 f"🧠 <b>Math CAPTCHA</b>\n\nWhat is <b>{a} {op} {b}</b>?",
@@ -520,8 +523,8 @@ def register_handlers(bot):
                 options = list(wrong_set) + [answer]
                 random.shuffle(options)
                 markup = InlineKeyboardMarkup()
-                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}:{answer}") for opt in options[:2]])
-                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}:{answer}") for opt in options[2:]])
+                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}") for opt in options[:2]])
+                markup.row(*[InlineKeyboardButton(opt, callback_data=f"captcha_verify:text:{opt}") for opt in options[2:]])
                 return (
                     "🔡 <b>Text CAPTCHA</b>\n\nLook at the image and choose the correct text below.",
                     answer,
@@ -693,7 +696,7 @@ def register_handlers(bot):
                         .replace("{username}", username)
                         .replace("{group}", group_name)
                         .replace("{date}", date_now))
-            except Exception as e:
+            except Exception:
                 text = f"Welcome, {name_html}!" # minimal fallback if replace fails
 
             try:
@@ -1142,7 +1145,6 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             db.log_event(f"Admin {message.from_user.id} banned {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("Click to unban", callback_data=f"unban_{t_id}"))
             bot.reply_to(message, format_alert_message("msg_after_ban", "🔨 User <b>{name}</b> (<code>{id}</code>) has been <b>banned</b>.", target), parse_mode="HTML", reply_markup=markup)
@@ -1167,7 +1169,6 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             bot.unban_chat_member(message.chat.id, t_id)
-            name = getattr(target, 'first_name', str(t_id))
             bot.reply_to(message, format_alert_message("msg_after_kick", "Booted 👢 User <b>{name}</b> (<code>{id}</code>) has been <b>kicked</b>.", target), parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Kick failed: {friendly_error(e)}")
@@ -1190,7 +1191,6 @@ def register_handlers(bot):
                 message.chat.id, t_id,
                 permissions=telebot.types.ChatPermissions(can_send_messages=False)
             )
-            name = getattr(target, 'first_name', str(t_id))
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("Click to unmute", callback_data=f"unmute_{t_id}"))
             bot.reply_to(message, format_alert_message("msg_after_mute", "🔇 User <b>{name}</b> (<code>{id}</code>) has been <b>muted</b>.", target), parse_mode="HTML", reply_markup=markup)
@@ -1212,7 +1212,7 @@ def register_handlers(bot):
         try:
             bot.ban_chat_member(message.chat.id, t_id)
             db.log_event(f"Shadow Admin {message.from_user.id} banned {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> banned by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Ban failed: {friendly_error(e)}")
@@ -1229,9 +1229,11 @@ def register_handlers(bot):
         
         t_id = target.id
         try:
+            # Kick = ban then immediately unban (user removed without a permanent ban)
+            bot.ban_chat_member(message.chat.id, t_id)
             bot.unban_chat_member(message.chat.id, t_id)
             db.log_event(f"Shadow Admin {message.from_user.id} kicked {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> kicked by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Kick failed: {friendly_error(e)}")
@@ -1253,7 +1255,7 @@ def register_handlers(bot):
                 permissions=telebot.types.ChatPermissions(can_send_messages=False)
             )
             db.log_event(f"Shadow Admin {message.from_user.id} muted {t_id} in {message.chat.id}")
-            name = getattr(target, 'first_name', str(t_id))
+            name = html.escape(str(getattr(target, 'first_name', str(t_id))))
             bot.reply_to(message, f"<b>{name}</b> muted by developer.", parse_mode="HTML")
         except Exception as e:
             bot.reply_to(message, f"❌ Mute failed: {friendly_error(e)}")
@@ -1718,14 +1720,18 @@ def register_handlers(bot):
             return bot.reply_to(message, "Reply to a message to report it to admins.")
         try:
             admins = bot.get_chat_administrators(message.chat.id)
-            chat_link_id = abs(message.chat.id) % (10 ** 10)
+            # Proper channel id for t.me/c/... links: -100xxxxxxxxxx -> xxxxxxxxxx
+            raw_id = str(abs(message.chat.id))
+            chat_link_id = raw_id[3:] if raw_id.startswith("100") and len(raw_id) > 10 else raw_id
+            chat_title = html.escape(str(message.chat.title or "Group"))
+            reporter = html.escape(str(message.from_user.first_name or "User"))
             for admin in admins:
                 if not admin.user.is_bot:
                     try:
                         bot.send_message(
                             admin.user.id,
-                            f"🚨 <b>Report from {message.chat.title}</b>\n\n"
-                            f"Reported by: {message.from_user.first_name}\n"
+                            f"🚨 <b>Report from {chat_title}</b>\n\n"
+                            f"Reported by: {reporter}\n"
                             f"Message: <a href='https://t.me/c/{chat_link_id}/{message.reply_to_message.message_id}'>View Message</a>",
                             parse_mode="HTML"
                         )
@@ -1942,29 +1948,6 @@ def register_handlers(bot):
         panel_text, markup = build_captcha_panel(message.chat.id, group)
         bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
     @bot.message_handler(commands=['setcaptchatext'])
     def cmd_setcaptchatext(message):
@@ -2242,443 +2225,38 @@ def register_handlers(bot):
 
     # ── /promote ──
     # ── /promote ──
-    @bot.message_handler(commands=['promote'])
-    def cmd_promote(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        target = get_target_user(message)
-        if not target:
-            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
-        t_id = target.id
-        t_uname = getattr(target, 'username', None)
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, t_uname):
-            return bot.reply_to(message, "⚠️ Cannot promote this user (already an admin or owner protected).")
-        try:
-            bot.promote_chat_member(message.chat.id, t_id,
-                can_change_info=True, can_post_messages=True, can_edit_messages=True,
-                can_delete_messages=True, can_invite_users=True, can_restrict_members=True,
-                can_pin_messages=True, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
-            bot.reply_to(message, f"⏫ User <b>{name}</b> (<code>{t_id}</code>) promoted to <b>Admin</b>!", parse_mode="HTML")
-        except Exception as e:
-            if "RIGHT_FORBIDDEN" in str(e):
-                bot.reply_to(message, "❌ <b>RIGHT_FORBIDDEN</b>\n\nThe bot needs the <b>\"Add new admins\"</b> permission to promote users.\n\n"
-                    "👤 Go to Group Settings → Administrators → select the bot → enable <b>\"Add new admins\"</b>.",
-                    parse_mode="HTML")
-            else:
-                bot.reply_to(message, f"❌ Promote failed: {friendly_error(e)}")
 
     # ── /demote ──
-    @bot.message_handler(commands=['demote'])
-    def cmd_demote(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        target = get_target_user(message)
-        if not target:
-            return bot.reply_to(message, "❌ Reply to a user or provide their ID/@username.")
-        t_id = target.id
-        if not can_act_on(bot, message.chat.id, message.from_user.id, message.from_user.username, t_id, getattr(target, 'username', None)):
-            return bot.reply_to(message, "⚠️ Cannot demote this user.")
-        try:
-            bot.promote_chat_member(message.chat.id, t_id,
-                can_change_info=False, can_post_messages=False, can_edit_messages=False,
-                can_delete_messages=False, can_invite_users=False, can_restrict_members=False,
-                can_pin_messages=False, can_promote_members=False)
-            name = getattr(target, 'first_name', str(t_id))
-            bot.reply_to(message, f"⏬ User <b>{name}</b> (<code>{t_id}</code>) has been <b>demoted</b>.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Demote failed: {friendly_error(e)}")
 
     # ── /pin ──
-    @bot.message_handler(commands=['pin'])
-    def cmd_pin(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        if not message.reply_to_message:
-            return bot.reply_to(message, "Reply to a message to pin it.")
-        try:
-            bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
-            bot.reply_to(message, "📌 Message pinned!")
-        except Exception as e:
-            bot.reply_to(message, str(e))
 
     # ── /unpin ──
-    @bot.message_handler(commands=['unpin'])
-    def cmd_unpin(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.unpin_all_chat_messages(message.chat.id)
-            bot.reply_to(message, "📌 All messages unpinned!")
-        except Exception as e:
-            bot.reply_to(message, str(e))
 
     # ── /report ──
-    @bot.message_handler(commands=['report'])
-    def cmd_report(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not message.reply_to_message:
-            return bot.reply_to(message, "Reply to a message to report it to admins.")
-        try:
-            admins = bot.get_chat_administrators(message.chat.id)
-            chat_link_id = abs(message.chat.id) % (10 ** 10)
-            for admin in admins:
-                if not admin.user.is_bot:
-                    try:
-                        bot.send_message(
-                            admin.user.id,
-                            f"🚨 <b>Report from {message.chat.title}</b>\n\n"
-                            f"Reported by: {message.from_user.first_name}\n"
-                            f"Message: <a href='https://t.me/c/{chat_link_id}/{message.reply_to_message.message_id}'>View Message</a>",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-            bot.reply_to(message, "🚨 Admins have been notified.")
-        except Exception:
-            pass
 
     # ── /setwelcome — UPGRADED (reply-to-set: text / photo+caption / GIF+caption) ──
-    @bot.message_handler(commands=['setwelcome'])
-    def cmd_setwelcome(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-
-        # ── Reply-based method ──
-        if message.reply_to_message:
-            m = message.reply_to_message
-            if m.photo:
-                file_id = m.photo[-1].file_id
-                caption = m.caption or "Welcome, {name}! 👋"
-                db.update_group_setting(message.chat.id, "welcome_type", "photo")
-                db.update_group_setting(message.chat.id, "welcome_file_id", file_id)
-                db.update_group_setting(message.chat.id, "welcome_message", caption)
-                bot.reply_to(message,
-                    "✅ <b>Welcome image set!</b>\n\n"
-                    "New members will be greeted with your photo + caption.\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-
-            elif m.animation:
-                file_id = m.animation.file_id
-                caption = m.caption or "Welcome, {name}! 👋"
-                db.update_group_setting(message.chat.id, "welcome_type", "gif")
-                db.update_group_setting(message.chat.id, "welcome_file_id", file_id)
-                db.update_group_setting(message.chat.id, "welcome_message", caption)
-                bot.reply_to(message,
-                    "✅ <b>Welcome GIF set!</b>\n\n"
-                    "New members will be greeted with your animated GIF + caption.\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-
-            elif m.text:
-                db.update_group_setting(message.chat.id, "welcome_type", "text")
-                db.update_group_setting(message.chat.id, "welcome_file_id", "")
-                db.update_group_setting(message.chat.id, "welcome_message", m.text)
-                bot.reply_to(message,
-                    "✅ <b>Welcome text set!</b>\n"
-                    "<i>Use {name} or {id} for personalization.</i>",
-                    parse_mode="HTML")
-                return
-            else:
-                bot.reply_to(message,
-                    "❌ Unsupported type. Reply to a <b>text</b>, <b>photo+caption</b>, or <b>GIF+caption</b>.",
-                    parse_mode="HTML")
-                return
-
-        # ── Inline text method: /setwelcome <text> ──
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "welcome_type", "text")
-            db.update_group_setting(message.chat.id, "welcome_file_id", "")
-            db.update_group_setting(message.chat.id, "welcome_message", parts[1])
-            bot.reply_to(message,
-                "✅ <b>Welcome message updated!</b>\n<i>Use {name} or {id} to personalize.</i>",
-                parse_mode="HTML")
-        # ── Show current setting ──
-        group_data = db.get_group(message.chat.id)
-        current_msg = group_data.get("welcome_message", "Welcome, {name}! 👋")
-        current_type = group_data.get("welcome_type", "text")
-        
-        bot.reply_to(message,
-            f"💡 <b>Current Welcome Message ({current_type}):</b>\n\n"
-            f"<code>{html.escape(current_msg)}</code>\n\n"
-            "📌 <b>How to set:</b>\n"
-            "1️⃣ <b>Text:</b> <code>/setwelcome Hello {name}!</code>\n"
-            "2️⃣ <b>Image + Caption:</b> Send a photo, then <b>reply</b> with <code>/setwelcome</code>\n"
-            "3️⃣ <b>GIF + Caption:</b> Send a GIF, then <b>reply</b> with <code>/setwelcome</code>\n\n"
-            "📌 <b>Placeholders:</b>\n"
-            "• <code>{name}</code> - Full name\n"
-            "• <code>{username}</code> - @username\n"
-            "• <code>{date}</code> - Today's date\n"
-            "• <code>{group}</code> - Group title\n"
-            "• <code>{id}</code> - User ID",
-            parse_mode="HTML")
 
 
     # ── /setleave ──
-    @bot.message_handler(commands=['setleave'])
-    def cmd_setleave(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-
-        # ── Reply method for photos/GIFs/text ──
-        if message.reply_to_message:
-            m = message.reply_to_message
-            if m.photo:
-                file_id = m.photo[-1].file_id
-                caption = m.caption or "Goodbye, {name}!"
-                db.update_group_setting(message.chat.id, "leave_type", "photo")
-                db.update_group_setting(message.chat.id, "leave_file_id", file_id)
-                db.update_group_setting(message.chat.id, "leave_message", caption)
-                bot.reply_to(message, "✅ <b>Leave photo set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-
-            elif m.animation:
-                file_id = m.animation.file_id
-                caption = m.caption or "Goodbye, {name}!"
-                db.update_group_setting(message.chat.id, "leave_type", "gif")
-                db.update_group_setting(message.chat.id, "leave_file_id", file_id)
-                db.update_group_setting(message.chat.id, "leave_message", caption)
-                bot.reply_to(message, "✅ <b>Leave GIF set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-
-            elif m.text:
-                db.update_group_setting(message.chat.id, "leave_type", "text")
-                db.update_group_setting(message.chat.id, "leave_file_id", "")
-                db.update_group_setting(message.chat.id, "leave_message", m.text)
-                bot.reply_to(message, "✅ <b>Leave text set!</b>\n<i>Use {name} or {id} for personalization.</i>", parse_mode="HTML")
-                return
-            else:
-                bot.reply_to(message, "❌ Unsupported type. Reply to a <b>text</b>, <b>photo+caption</b>, or <b>GIF+caption</b>.", parse_mode="HTML")
-                return
-
-        # ── Inline text method: /setleave <text> ──
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "leave_type", "text")
-            db.update_group_setting(message.chat.id, "leave_file_id", "")
-            db.update_group_setting(message.chat.id, "leave_message", parts[1])
-            bot.reply_to(message, "✅ <b>Leave message updated!</b>\n<i>Use {name} or {id} to personalize.</i>", parse_mode="HTML")
-        # ── Show current setting ──
-        group_data = db.get_group(message.chat.id)
-        current_msg = group_data.get("leave_message", "Goodbye {name}!")
-        current_type = group_data.get("leave_type", "text")
-
-        bot.reply_to(message,
-            f"💡 <b>Current Leave Message ({current_type}):</b>\n\n"
-            f"<code>{html.escape(current_msg)}</code>\n\n"
-            "📌 <b>How to set:</b>\n"
-            "1️⃣ <b>Text:</b> <code>/setleave Goodbye {name}!</code>\n"
-            "2️⃣ <b>Image + Caption:</b> Send a photo, then <b>reply</b> with <code>/setleave</code>\\n"
-            "3️⃣ <b>GIF + Caption:</b> Send a GIF, then <b>reply</b> with <code>/setleave</code>\\n\\n"
-            "📌 <b>Placeholders:</b>\\n"
-            "• <code>{name}</code> - Full name\\n"
-            "• <code>{username}</code> - @username\\n"
-            "• <code>{date}</code> - Today's date\\n"
-            "• <code>{group}</code> - Group title\\n"
-            "• <code>{id}</code> - User ID",
-            parse_mode="HTML")
 
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchakicktime'])
-    def cmd_captchakicktime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_kick_time", "")
-                bot.reply_to(message, "✅ CAPTCHA kick time disabled.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_kick_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-kick time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captcha'])
-    def cmd_captcha(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower() in ('yes', 'on', 'true', '1')
-            db.update_group_setting(message.chat.id, "captcha", int(val))
-        group = db.get_group(message.chat.id)
-        panel_text, markup = build_captcha_panel(message.chat.id, group)
-        bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['captchamutetime'])
-    def cmd_captchamutetime(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split()
-        if len(parts) > 1:
-            val = parts[1].lower()
-            if val in ('off', 'none', '0'):
-                db.update_group_setting(message.chat.id, "captcha_mute_time", "")
-                bot.reply_to(message, "✅ CAPTCHA mute time disabled. Users stay muted indefinitely until solved.")
-            else:
-                secs, disp = parse_duration(val)
-                if secs is None:
-                    bot.reply_to(message, f"❌ {disp}")
-                else:
-                    db.update_group_setting(message.chat.id, "captcha_mute_time", disp)
-                    group = db.get_group(message.chat.id)
-                    panel_text, markup = build_captcha_panel(message.chat.id, group)
-                    bot.reply_to(message, f"✅ Auto-unmute time set to <b>{disp}</b>.\n\n" + panel_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            group = db.get_group(message.chat.id)
-            panel_text, markup = build_captcha_panel(message.chat.id, group)
-            bot.reply_to(message, panel_text, reply_markup=markup, parse_mode="HTML")
 
-    @bot.message_handler(commands=['setcaptchatext'])
-    def cmd_setcaptchatext(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) > 1:
-            db.update_group_setting(message.chat.id, "captcha_text", parts[1])
-            bot.reply_to(message, "✅ Custom CAPTCHA text updated.")
-        else:
-            group = db.get_group(message.chat.id)
-            val = group.get("captcha_text", "Click to prove you are human")
-            bot.reply_to(message, f"Current CAPTCHA text is: {val}\nUse /setcaptchatext <text> to change.")
 
-    @bot.message_handler(commands=['resetcaptchatext'])
-    def cmd_resetcaptchatext(message):
-        if message.chat.type not in ['group', 'supergroup']: return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        db.update_group_setting(message.chat.id, "captcha_text", "Click to prove you are human")
-        bot.reply_to(message, "✅ CAPTCHA text reset to default.")
 
     # ── /rules ──
-    @bot.message_handler(commands=['rules'])
-    def cmd_rules(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        group = db.get_group(message.chat.id)
-        if group:
-            bot.reply_to(message, group.get("rules", "No rules set."))
 
     # ── /addfilter ──
-    @bot.message_handler(commands=['addfilter'])
-    def cmd_addfilter(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) < 2:
-            return bot.reply_to(message, "Format: /addfilter <keyword> (reply to media/text)")
-        keyword = parts[1].strip()
-        if not message.reply_to_message:
-            return bot.reply_to(message, "You must reply to the content you want to set as the filter response.")
-        m = message.reply_to_message
-        filter_data = {}
-        if m.text:
-            filter_data = {"type": "text", "text": m.text}
-        elif m.photo:
-            filter_data = {"type": "photo", "file_id": m.photo[-1].file_id, "caption": m.caption or ""}
-        elif m.sticker:
-            filter_data = {"type": "sticker", "file_id": m.sticker.file_id}
-        elif m.animation:
-            filter_data = {"type": "gif", "file_id": m.animation.file_id}
-        else:
-            return bot.reply_to(message, "Unsupported media type.")
-        db.add_filter(message.chat.id, keyword, filter_data)
-        bot.reply_to(message, f"✅ Filter '<code>{keyword}</code>' added!", parse_mode="HTML")
 
     # ── /removefilter ──
-    @bot.message_handler(commands=['removefilter'])
-    def cmd_removefilter(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        parts = message.text.split(None, 1)
-        if len(parts) < 2:
-            return bot.reply_to(message, "Format: /removefilter <keyword>")
-        db.remove_filter(message.chat.id, parts[1].strip())
-        bot.reply_to(message, f"✅ Filter '<code>{parts[1].strip()}</code>' removed.", parse_mode="HTML")
 
     # ── /filters ──
-    @bot.message_handler(commands=['filters'])
-    def cmd_list_filters(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        group = db.get_group(message.chat.id)
-        if not group or not group.get("filters"):
-            return bot.reply_to(message, "No filters defined for this group.")
-        fts = group["filters"].keys()
-        text = "<b>🔍 Active Group Filters:</b>\n\n" + "\n".join([f"• <code>{f}</code>" for f in fts])
-        bot.reply_to(message, text, parse_mode="HTML")
 
     # ── /lock ──
-    @bot.message_handler(commands=['lock'])
-    def cmd_lock(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.set_chat_permissions(message.chat.id, telebot.types.ChatPermissions(can_send_messages=False))
-            bot.reply_to(message, "🔒 <b>Group Locked!</b> Regular members can no longer send messages.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Lock failed: {friendly_error(e)}")
 
     # ── /unlock ──
-    @bot.message_handler(commands=['unlock'])
-    def cmd_unlock(message):
-        if message.chat.type not in ['group', 'supergroup']:
-            return
-        if not is_admin(bot, message.chat.id, message.from_user.id) and not is_owner(message.from_user.username): return reply_not_admin(bot, message)
-        try:
-            bot.set_chat_permissions(message.chat.id, telebot.types.ChatPermissions(
-                can_send_messages=True, can_send_media_messages=True,
-                can_send_other_messages=True, can_add_web_page_previews=True))
-            bot.reply_to(message, "🔓 <b>Group Unlocked!</b> Regular members can now speak.", parse_mode="HTML")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Unlock failed: {friendly_error(e)}")
 
     # ── /link ──
     @bot.message_handler(commands=['link'])
@@ -3089,8 +2667,9 @@ def register_handlers(bot):
         """
         callback_data format:
           captcha_verify:button:<chat_id>:<user_id>
-          captcha_verify:math:<chosen>:<correct>:<chat_id>:<user_id>
-          captcha_verify:text:<chosen>:<correct>:<chat_id>:<user_id>
+          captcha_verify:math:<chosen>:<chat_id>:<user_id>
+          captcha_verify:text:<chosen>:<chat_id>:<user_id>
+        (correct answers are verified server-side from the pending-captcha record)
         """
         parts = call.data.split(":")
         # parts[0] = 'captcha_verify'
@@ -3101,14 +2680,10 @@ def register_handlers(bot):
                 # format: captcha_verify:button:<chat_id>:<user_id>
                 chat_id = int(parts[2])
                 user_id = int(parts[3])
-                passed  = True
             else:
-                # format: captcha_verify:math/text:<chosen>:<correct>:<chat_id>:<user_id>
-                chosen  = parts[2]
-                correct = parts[3]
-                chat_id = int(parts[4])
-                user_id = int(parts[5])
-                passed  = (chosen == correct)
+                # format: captcha_verify:math/text:<chosen>:<chat_id>:<user_id>
+                chat_id = int(parts[3])
+                user_id = int(parts[4])
         except (IndexError, ValueError):
             bot.answer_callback_query(call.id, "❌ Invalid CAPTCHA data.", show_alert=True)
             return
@@ -3118,10 +2693,21 @@ def register_handlers(bot):
             bot.answer_callback_query(call.id, "❌ This CAPTCHA is not for you.", show_alert=True)
             return
 
+        # Verify against the challenge stored in the database — never trust a
+        # correct answer embedded in the callback_data (it is readable from the
+        # message markup). A missing pending record means the challenge was
+        # already resolved or expired.
         pending = db.get_pending_captcha(chat_id, user_id)
         if not pending:
             bot.answer_callback_query(call.id, "❌ CAPTCHA already resolved or expired.", show_alert=True)
             return
+
+        if mode == 'button':
+            passed = True  # button mode: a click is the proof
+        else:
+            expected = str(pending.get('correct_answer', ''))
+            chosen   = parts[2]
+            passed   = (chosen == expected)
 
         if passed:
             group_data   = db.get_group(chat_id)
@@ -3414,7 +3000,7 @@ def register_handlers(bot):
                             fwd = bot.forward_message(chat_id=dest_id_int, from_chat_id=message.chat.id, message_id=message.message_id)
                             info_text = f"👤 <b>User:</b> {message.from_user.first_name} (<code>{message.from_user.id}</code>)\n🏘️ <b>Group:</b> {message.chat.title} (<code>{message.chat.id}</code>)"
                             bot.send_message(dest_id_int, info_text, reply_to_message_id=fwd.message_id, parse_mode="HTML")
-                        except Exception as forward_err:
+                        except Exception:
                             # Fallback to copy_message if forward_message is restricted
                             try:
                                 copy_msg = bot.copy_message(chat_id=dest_id_int, from_chat_id=message.chat.id, message_id=message.message_id)
