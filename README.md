@@ -67,12 +67,20 @@ The web dashboard has a **💬 Messages** page with a Telegram-style dark layout
 - **Download** a chat as **TXT** (readable transcript), **JSON** (full data) or **CSV** (Excel-ready, UTF-8 BOM).
 
 Messages are captured with a Telegram middleware, so existing commands and moderation behave exactly
-as before. Only text and media captions/labels are stored (media files themselves are not). Controlled by:
+as before. Only text and media captions/labels are stored (media files themselves are not).
+
+**No environment setup is needed.** Capture is on and every message is kept by default. Optional overrides
+(only if you want them):
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MESSAGE_LOG_ENABLED` | `1` | `0` turns message capture off |
-| `MESSAGE_LOG_RETENTION_DAYS` | `90` | Older messages are deleted automatically; `0` keeps them forever |
+| `MESSAGE_LOG_RETENTION_DAYS` | `0` | `0` keeps everything; a number deletes messages older than that many days |
+
+The chat list shows every group and user stored in the database, including ones with no captured
+messages yet (marked "No messages captured yet").
+
+---
 
 ### 📥 Importing old messages
 

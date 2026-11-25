@@ -10,9 +10,9 @@ How it hooks in:
   * Storage is best-effort: any failure is logged and ignored.
 
 Configuration (environment):
-  MESSAGE_LOG_ENABLED         1 (default) / 0 — master switch
-  MESSAGE_LOG_RETENTION_DAYS  90 (default) — older messages are deleted
-                              automatically; 0 = keep forever
+  No environment setup is required. Defaults are built in:
+  MESSAGE_LOG_ENABLED         optional override, default on (0 disables capture)
+  MESSAGE_LOG_RETENTION_DAYS  optional override, default 0 = keep every message
   CHAT_ACTIVITY_TIMEZONE      used to format timestamps in exports
 """
 
@@ -63,9 +63,9 @@ def message_log_enabled():
 
 def _retention_days():
     try:
-        return int(os.getenv("MESSAGE_LOG_RETENTION_DAYS", "90").strip() or "90")
+        return int(os.getenv("MESSAGE_LOG_RETENTION_DAYS", "0").strip() or "0")
     except ValueError:
-        return 90
+        return 0  # keep everything unless explicitly configured
 
 
 def _display_name(user_or_chat):
