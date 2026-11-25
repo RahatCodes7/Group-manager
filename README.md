@@ -54,6 +54,50 @@ numbers, no simulated release notes, no fake features. Welcome media is optional
 
 ---
 
+## 💬 Messages Viewer (Dashboard)
+
+The web dashboard has a **💬 Messages** page with a Telegram-style dark layout:
+
+- **Chats on the left** — every private chat with a user (DM with the bot) and every group,
+  filterable by *Users* / *Groups* and searchable. Each shows the latest message and a count.
+- **Conversation on the right** — messages as chat bubbles with sender names, dates and times
+  (in `CHAT_ACTIVITY_TIMEZONE`). Replies show a quote of the message being answered; click the
+  quote to jump to it.
+- **Search** inside a chat, **Load older messages** for long histories, and live refresh every 15s.
+- **Download** a chat as **TXT** (readable transcript), **JSON** (full data) or **CSV** (Excel-ready, UTF-8 BOM).
+
+Messages are captured with a Telegram middleware, so existing commands and moderation behave exactly
+as before. Only text and media captions/labels are stored (media files themselves are not).
+
+**No environment setup is needed.** Capture is on and every message is kept by default. Optional overrides
+(only if you want them):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MESSAGE_LOG_ENABLED` | `1` | `0` turns message capture off |
+| `MESSAGE_LOG_RETENTION_DAYS` | `0` | `0` keeps everything; a number deletes messages older than that many days |
+
+The chat list shows every group and user stored in the database, including ones with no captured
+messages yet (marked "No messages captured yet").
+
+---
+
+### 📥 Importing old messages
+
+Messages sent *before* the viewer was deployed are not in the database, and the Bot API cannot
+fetch past chat history. To bring them in, export the chat from **Telegram Desktop**
+(⋮ → *Export chat history* → Format **JSON**) and run:
+
+```bash
+python import_telegram_export.py result.json            # imports into DATABASE_URL
+python import_telegram_export.py result.json --dry-run  # just count, write nothing
+```
+
+Re-running is safe: messages already present are skipped. Replies are linked when the replied-to
+message is inside the same export. Media files are not imported, only their labels.
+
+---
+
 ## 📖 Full Command List
 
 ### 🛡️ Anti-Spam & Protection

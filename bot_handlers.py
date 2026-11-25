@@ -8,6 +8,7 @@ from tictactoe import (init_db, get_game, get_active_game, create_lobby, join_lo
     build_lobby_markup, build_board_markup, build_game_over_markup,
     format_lobby_message, format_game_message, format_game_over_message)
 from chat_activity import register_chat_handlers, track_group_message
+from message_log import register_message_log
 
 try:
     init_db()
@@ -871,6 +872,9 @@ _FULL_HELP_TEXT = ("<b>🛠️ Bot Commands List</b>\n\n"
                 "/warn → reply to user message")
 
 def register_handlers(bot):
+
+    # ── MESSAGE LOG: observe every incoming message for the dashboard Messages viewer ──
+    register_message_log(bot)
 
     # ── CAPTCHA GENERATION HELPERS ──
     def _generate_captcha(mode, captcha_text):

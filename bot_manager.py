@@ -1,5 +1,6 @@
 import threading
 import telebot
+from telebot import apihelper
 from database import db
 import logging
 import time
@@ -38,6 +39,9 @@ class BotManager:
 
         try:
             self._stop_event.clear()
+            # Middleware lets the Message Log observe every incoming message
+            # without consuming it (see message_log.py). Must be set before TeleBot().
+            apihelper.ENABLE_MIDDLEWARE = True
             self.bot = telebot.TeleBot(token, parse_mode=None)
 
             from bot_handlers import register_handlers
