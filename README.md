@@ -74,6 +74,20 @@ as before. Only text and media captions/labels are stored (media files themselve
 | `MESSAGE_LOG_ENABLED` | `1` | `0` turns message capture off |
 | `MESSAGE_LOG_RETENTION_DAYS` | `90` | Older messages are deleted automatically; `0` keeps them forever |
 
+### 📥 Importing old messages
+
+Messages sent *before* the viewer was deployed are not in the database, and the Bot API cannot
+fetch past chat history. To bring them in, export the chat from **Telegram Desktop**
+(⋮ → *Export chat history* → Format **JSON**) and run:
+
+```bash
+python import_telegram_export.py result.json            # imports into DATABASE_URL
+python import_telegram_export.py result.json --dry-run  # just count, write nothing
+```
+
+Re-running is safe: messages already present are skipped. Replies are linked when the replied-to
+message is inside the same export. Media files are not imported, only their labels.
+
 ---
 
 ## 📖 Full Command List
