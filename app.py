@@ -1104,6 +1104,60 @@ async def download_database():
 
 
 # ─────────────────────────────────────────────────────────────
+# API — MESSAGES (user DMs + group messages, with replies & export)
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/api/messages/chats")
+async def api_message_chats():
+    from message_log import serialize_message, format_sent_at, iso_utc
+    rows = db.list_message_conversations(limit=500)
+    chats = []
+    for r in rows:
+        chats.append({
+            "chat_id": r["chat_id"],
+            "chat_type": r["chat_type"],
+            "title": r["chat_title"] or r["chat_id"],
+            "message_count": r["msg_count"],
+            "last_user": r["last_user"],
+            "last_text": r["last_text"],
+            "last_type": r["last_type"],
+            "last_at": iso_utc(r["last_at"]),
+            "last_at_local": format_sent_at(r["last_at"]),
+        })
+    return {"ok": True, "chats": chats}
+
+
+@app.get("/api/messages")
+async def api_messages(chat_id: str, before: Optional[int] = None, limit: int = 200, q: Optional[str] = None):
+    from message_log import serialize_message
+    limit = max(1, min(int(limit or 200), 500))
+    rows, has_more = db.get_chat_messages(chat_id, before_id=before, limit=limit, search=(q or "").strip() or None)
+    return {
+        "ok": True,
+        "messages": [serialize_message(r) for r in rows],
+        "has_more": has_more,
+    }
+
+
+@app.get("/api/messages/export")
+async def api_messages_export(chat_id: str, format: str = "txt"):
+    from message_log import build_export
+    fmt = (format or "txt").lower()
+    if fmt not in ("txt", "json", "csv"):
+        return JSONResponse({"ok": False, "error": "format must be txt, json or csv"}, status_code=400)
+    rows = db.iter_chat_messages_for_export(chat_id)
+    title = rows[-1]["chat_title"] if rows else ""
+    data, media_type, ext = build_export(rows, fmt, chat_title=title, chat_id=str(chat_id))
+    from message_log import safe_filename
+    filename = f"{safe_filename(title, chat_id)}_messages.{ext}"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # API — GROUP SYNCHRONIZATION
 # ─────────────────────────────────────────────────────────────
 

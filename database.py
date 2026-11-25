@@ -659,6 +659,29 @@ class Database:
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_warn_history_chat_user ON warn_history(chat_id, user_id, active)")
 
+        # ── MESSAGE LOG (dashboard Messages viewer: user DMs + group messages) ──
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL DEFAULT '',
+                chat_title TEXT NOT NULL DEFAULT '',
+                message_id BIGINT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT 'text',
+                text TEXT NOT NULL DEFAULT '',
+                reply_to_message_id BIGINT,
+                reply_to_user_name TEXT NOT NULL DEFAULT '',
+                reply_to_text TEXT NOT NULL DEFAULT '',
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (chat_id, message_id)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_sent ON chat_messages(sent_at)")
+
     def get_config(self):
         with self._read_guard():
             cached = _config_cache.get("config")
@@ -1381,6 +1404,140 @@ class Database:
                     return users, groups
                 except:
                     return {}, {}
+
+    # ----------------------------------------------------------
+    # Message log (Messages viewer)
+    # ----------------------------------------------------------
+    def save_chat_message(self, row):
+        """Insert one message record. Duplicates (same chat + message_id) are ignored."""
+        if not self._check_conn():
+            return False
+        with self.lock:
+            try:
+                c = self.conn.cursor()
+                c.execute(
+                    """INSERT INTO chat_messages
+                       (chat_id, chat_type, chat_title, message_id, user_id, user_name, username,
+                        content_type, text, reply_to_message_id, reply_to_user_name, reply_to_text, sent_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                       ON CONFLICT (chat_id, message_id) DO NOTHING""",
+                    (
+                        row["chat_id"], row["chat_type"], row["chat_title"], row["message_id"],
+                        row["user_id"], row["user_name"], row["username"], row["content_type"],
+                        row["text"], row["reply_to_message_id"], row["reply_to_user_name"],
+                        row["reply_to_text"], row["sent_at"],
+                    ),
+                )
+                self.conn.commit()
+                return True
+            except Exception as e:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                print(f"Error saving chat message: {e}")
+                return False
+
+    def prune_chat_messages(self, retention_days):
+        """Delete messages older than retention_days (0 or less = keep forever)."""
+        if retention_days <= 0 or not self._check_conn():
+            return 0
+        with self.lock:
+            try:
+                c = self.conn.cursor()
+                c.execute(
+                    "DELETE FROM chat_messages WHERE sent_at < now() - (%s * INTERVAL '1 day')",
+                    (int(retention_days),),
+                )
+                deleted = c.rowcount
+                self.conn.commit()
+                return deleted
+            except Exception:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                return 0
+
+    def list_message_conversations(self, limit=500):
+        """One row per chat (user DM or group) with its latest message preview."""
+        with self._read_guard():
+            if not self._check_conn():
+                return []
+            with self.lock:
+                try:
+                    c = self.conn.cursor()
+                    c.execute(
+                        """SELECT agg.chat_id, agg.msg_count, agg.last_id, agg.last_at,
+                                  m.chat_type, m.chat_title, m.user_name AS last_user,
+                                  m.text AS last_text, m.content_type AS last_type
+                           FROM (
+                               SELECT chat_id, COUNT(*) AS msg_count, MAX(id) AS last_id,
+                                      MAX(sent_at) AS last_at
+                               FROM chat_messages GROUP BY chat_id
+                           ) agg
+                           JOIN chat_messages m ON m.id = agg.last_id
+                           ORDER BY agg.last_id DESC
+                           LIMIT %s""",
+                        (int(limit),),
+                    )
+                    return [dict(row) for row in c.fetchall()]
+                except Exception as e:
+                    print(f"Error listing message conversations: {e}")
+                    return []
+
+    def get_chat_messages(self, chat_id, before_id=None, limit=200, search=None):
+        """Return up to `limit` messages of one chat in chronological order.
+
+        Returns (rows, has_more). `before_id` pages backwards; `search` is a
+        case-insensitive substring match on the message text / sender name.
+        """
+        with self._read_guard():
+            if not self._check_conn():
+                return [], False
+            with self.lock:
+                try:
+                    c = self.conn.cursor()
+                    clauses = ["chat_id = %s"]
+                    params = [str(chat_id)]
+                    if before_id:
+                        clauses.append("id < %s")
+                        params.append(int(before_id))
+                    if search:
+                        pattern = "%" + str(search).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                        clauses.append("(text ILIKE %s OR user_name ILIKE %s)")
+                        params.extend([pattern, pattern])
+                    params.append(int(limit) + 1)
+                    c.execute(
+                        "SELECT * FROM chat_messages WHERE " + " AND ".join(clauses) +
+                        " ORDER BY id DESC LIMIT %s",
+                        tuple(params),
+                    )
+                    rows = [dict(r) for r in c.fetchall()]
+                    has_more = len(rows) > limit
+                    rows = rows[:limit]
+                    rows.reverse()
+                    return rows, has_more
+                except Exception as e:
+                    print(f"Error loading chat messages: {e}")
+                    return [], False
+
+    def iter_chat_messages_for_export(self, chat_id, max_rows=200000):
+        """All messages of one chat, oldest first (used by TXT/JSON/CSV export)."""
+        with self._read_guard():
+            if not self._check_conn():
+                return []
+            with self.lock:
+                try:
+                    c = self.conn.cursor()
+                    c.execute(
+                        "SELECT * FROM chat_messages WHERE chat_id = %s ORDER BY id ASC LIMIT %s",
+                        (str(chat_id), int(max_rows)),
+                    )
+                    return [dict(r) for r in c.fetchall()]
+                except Exception as e:
+                    print(f"Error exporting chat messages: {e}")
+                    return []
 
     def get_warnings_leaderboard(self, limit=10):
         with self._read_guard():

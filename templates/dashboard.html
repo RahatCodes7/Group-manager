@@ -124,6 +124,58 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:10px;}
 @media(max-width:960px){.sidebar{display:none;}.main{padding:18px;}.grid-2,.grid-3{grid-template-columns:1fr;}.stats-grid{grid-template-columns:repeat(2,1fr);}}
+
+/* ── MESSAGES VIEWER (Telegram dark theme) ── */
+.tg-app{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 210px);min-height:560px;border-radius:20px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);box-shadow:var(--shadow);background:#0e1621;}
+.tg-side{background:#17212b;display:flex;flex-direction:column;min-width:0;border-right:1px solid #0b1219;}
+.tg-search{padding:12px;}
+.tg-search input,.tg-header input{width:100%;background:#242f3d;border:none;border-radius:18px;padding:9px 14px;color:#f5f5f5;font:inherit;font-size:0.86rem;outline:none;}
+.tg-tabs{display:flex;gap:4px;padding:0 12px 10px;}
+.tg-tab{flex:1;background:none;border:none;color:#708499;padding:7px 0;border-radius:14px;font:inherit;font-size:0.8rem;font-weight:600;cursor:pointer;}
+.tg-tab.active{background:#2b5278;color:#fff;}
+.tg-chatlist{overflow-y:auto;flex:1;}
+.tg-chat{display:flex;gap:12px;padding:10px 12px;cursor:pointer;align-items:center;}
+.tg-chat:hover{background:#202b36;}
+.tg-chat.active{background:#2b5278;}
+.tg-avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:1.05rem;flex-shrink:0;}
+.tg-avatar-sm{width:34px;height:34px;font-size:0.9rem;align-self:flex-end;}
+.tg-avatar-spacer{width:34px;flex-shrink:0;}
+.tg-chat-body{flex:1;min-width:0;}
+.tg-chat-top,.tg-chat-bottom{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.tg-chat-title{color:#f5f5f5;font-weight:600;font-size:0.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+.tg-chat-time{color:#708499;font-size:0.72rem;white-space:nowrap;}
+.tg-chat-prev{color:#8b9bab;font-size:0.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+.tg-badge{background:#3a4b5c;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;font-weight:700;flex-shrink:0;}
+.tg-chat.active .tg-badge{background:#fff;color:#2b5278;}
+.tg-main{display:flex;flex-direction:column;min-width:0;background:#0e1621;}
+.tg-header{align-items:center;gap:12px;padding:10px 16px;background:#17212b;border-bottom:1px solid #0b1219;flex-wrap:wrap;}
+.tg-head-info{flex:1;min-width:150px;}
+.tg-head-title{color:#f5f5f5;font-weight:700;font-size:0.98rem;}
+.tg-head-sub{color:#708499;font-size:0.78rem;}
+.tg-header input{max-width:230px;}
+.tg-export{display:flex;gap:6px;flex-wrap:wrap;}
+.tg-dl{background:#2b5278;color:#fff;text-decoration:none;border-radius:10px;padding:7px 11px;font-size:0.78rem;font-weight:600;white-space:nowrap;}
+.tg-dl:hover{background:#376a9c;}
+.tg-thread{flex:1;overflow-y:auto;padding:16px 8%;background-color:#0e1621;background-image:radial-gradient(rgba(255,255,255,0.035) 1px,transparent 1px);background-size:22px 22px;}
+.tg-date{text-align:center;margin:12px 0;}
+.tg-date span{background:rgba(24,37,51,0.9);color:#f5f5f5;font-size:0.75rem;padding:3px 12px;border-radius:12px;}
+.tg-row{display:flex;gap:8px;margin-bottom:2px;align-items:flex-end;}
+.tg-row-head{margin-top:10px;}
+.tg-bubble{background:#182533;color:#f5f5f5;border-radius:14px;padding:6px 10px 4px;max-width:min(560px,80%);box-shadow:0 1px 1px rgba(0,0,0,0.25);}
+.tg-row-head .tg-bubble{border-bottom-left-radius:4px;}
+.tg-name{font-weight:600;font-size:0.84rem;margin-bottom:2px;}
+.tg-uname{color:#708499;font-weight:400;margin-left:6px;font-size:0.76rem;}
+.tg-quote{border-left:3px solid #5ba8f5;background:rgba(255,255,255,0.05);border-radius:6px;padding:5px 9px;margin:4px 0 6px;cursor:pointer;}
+.tg-quote:hover{background:rgba(255,255,255,0.09);}
+.tg-quote-name{font-weight:600;font-size:0.8rem;}
+.tg-quote-text{color:#c6d1dc;font-size:0.8rem;white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word;}
+.tg-text{white-space:pre-wrap;word-break:break-word;font-size:0.92rem;line-height:1.4;}
+.tg-meta{text-align:right;color:#708499;font-size:0.7rem;margin-top:2px;}
+.tg-row.tg-flash .tg-bubble{box-shadow:0 0 0 2px #6ab3f3;}
+.tg-more{text-align:center;margin:8px 0;}
+.tg-empty{color:#708499;text-align:center;padding:40px 16px;font-size:0.9rem;}
+@media(max-width:1100px){.tg-thread{padding:16px 3%;}}
+@media(max-width:760px){.tg-app{grid-template-columns:1fr;height:auto;}.tg-side{max-height:300px;}.tg-main{min-height:520px;}}
 </style>
 </head>
 <body>
@@ -146,6 +198,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
     <button class="nav-item" onclick="showSection('users')" id="nav-users"><span class="nav-icon">👥</span>Users</button>
     <button class="nav-item" onclick="showSection('groups')" id="nav-groups"><span class="nav-icon">🏘️</span>Groups</button>
     <button class="nav-item" onclick="showSection('leaderboard')" id="nav-leaderboard"><span class="nav-icon">🏆</span>Leaderboard</button>
+    <button class="nav-item" onclick="showSection('messages')" id="nav-messages"><span class="nav-icon">💬</span>Messages</button>
     <button class="nav-item" onclick="showSection('sync')" id="nav-sync"><span class="nav-icon">🔄</span>Group Synch.</button>
 
     <div class="nav-section">Control</div>
@@ -254,6 +307,50 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
           {% else %}
           <div class="empty"><div class="e-icon">✅</div>No warnings issued</div>
           {% endif %}
+        </div>
+      </div>
+    </section>
+
+    <!-- ── MESSAGES (Telegram-style viewer) ── -->
+    <section class="section" id="section-messages">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Messages</div>
+          <div class="page-subtitle">User DMs &amp; group messages — replies shown, downloadable as TXT / JSON / CSV</div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-ghost" onclick="refreshMessageChats()">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div class="tg-app">
+        <aside class="tg-side">
+          <div class="tg-search"><input id="tgSearch" placeholder="Search chats…" oninput="renderChatList()"></div>
+          <div class="tg-tabs">
+            <button type="button" class="tg-tab active" onclick="setTgFilter('all',this)">All</button>
+            <button type="button" class="tg-tab" onclick="setTgFilter('private',this)">👤 Users</button>
+            <button type="button" class="tg-tab" onclick="setTgFilter('group',this)">👥 Groups</button>
+          </div>
+          <div class="tg-chatlist" id="tgChatList"><div class="tg-empty">Loading…</div></div>
+        </aside>
+
+        <div class="tg-main">
+          <div class="tg-header" id="tgHeader" style="display:none;">
+            <div class="tg-avatar" id="tgHeadAvatar"></div>
+            <div class="tg-head-info">
+              <div class="tg-head-title" id="tgHeadTitle"></div>
+              <div class="tg-head-sub" id="tgHeadSub"></div>
+            </div>
+            <input id="tgMsgSearch" placeholder="Search in this chat… (Enter)" onkeydown="if(event.key==='Enter')loadChatMessages(true,true)">
+            <div class="tg-export">
+              <a class="tg-dl" id="tgDlTxt" href="#" download>⬇ TXT</a>
+              <a class="tg-dl" id="tgDlJson" href="#" download>⬇ JSON</a>
+              <a class="tg-dl" id="tgDlCsv" href="#" download>⬇ CSV</a>
+            </div>
+          </div>
+          <div class="tg-thread" id="tgThread">
+            <div class="tg-empty">Select a chat on the left to read its messages.</div>
+          </div>
         </div>
       </div>
     </section>
@@ -1159,6 +1256,7 @@ function showSection(name){
   if(nav)nav.classList.add('active');
   if(name === 'moderation') refreshModerations();
   if(name === 'sync') refreshSync();
+  if(name === 'messages') refreshMessageChats();
 }
 
 // ── LIVE STATS ──
@@ -1796,6 +1894,169 @@ if(location.hash){
   const valid=['overview','users','groups','leaderboard','tools','msglink','broadcast','logs','settings','moderation','automod'];
   if(valid.includes(sec))showSection(sec);
 }
+
+// ── MESSAGES VIEWER (Telegram-style) ──
+const TG_COLORS=['#ff8e86','#ffa85c','#b694f9','#5ccc5c','#4fc5d6','#5ba8f5','#ff7aa8'];
+const TG_TYPE_LABEL={photo:'Photo',video:'Video',animation:'GIF',sticker:'Sticker',document:'File',voice:'Voice message',audio:'Audio',video_note:'Video message',contact:'Contact',location:'Location',venue:'Venue',poll:'Poll',dice:'Dice',game:'Game'};
+let tgState={chats:[],filter:'all',current:null,messages:[],hasMore:false,pagedBack:false,oldestId:null,initialized:false};
+
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function tgColor(id){let h=0;const s=String(id);for(let i=0;i<s.length;i++){h=(h*31+s.charCodeAt(i))|0;}return TG_COLORS[Math.abs(h)%TG_COLORS.length];}
+function tgInitial(name){const t=String(name||'?').trim();return esc(t.charAt(0).toUpperCase()||'?');}
+function tgIsGroup(c){return c.chat_type==='group'||c.chat_type==='supergroup';}
+function tgShortTime(v){return v?String(v).slice(5,16):'';}
+
+function setTgFilter(f,btn){
+  tgState.filter=f;
+  document.querySelectorAll('.tg-tab').forEach(b=>b.classList.toggle('active',b===btn));
+  renderChatList();
+}
+
+function renderChatList(){
+  const box=document.getElementById('tgChatList');
+  if(!box)return;
+  const q=(document.getElementById('tgSearch')?.value||'').trim().toLowerCase();
+  const list=tgState.chats.filter(c=>{
+    if(tgState.filter==='private'&&tgIsGroup(c))return false;
+    if(tgState.filter==='group'&&!tgIsGroup(c))return false;
+    if(!q)return true;
+    return [c.title,c.last_user,c.last_text,c.chat_id].join(' ').toLowerCase().includes(q);
+  });
+  if(!list.length){
+    box.innerHTML='<div class="tg-empty">'+(tgState.chats.length?'No chats match this filter.':'No messages logged yet. Messages from users and groups appear here as the bot receives them.')+'</div>';
+    return;
+  }
+  box.innerHTML=list.map(c=>{
+    const active=c.chat_id===tgState.current?' active':'';
+    const avatarTxt=tgIsGroup(c)?'👥':tgInitial(c.title);
+    const prev=(c.last_user?esc(c.last_user)+': ':'')+esc(c.last_text||'');
+    return `<div class="tg-chat${active}" onclick="selectChat('${esc(c.chat_id)}')">
+      <div class="tg-avatar" style="background:${tgColor(c.chat_id)}">${avatarTxt}</div>
+      <div class="tg-chat-body">
+        <div class="tg-chat-top"><span class="tg-chat-title">${esc(c.title)}</span><span class="tg-chat-time">${esc(tgShortTime(c.last_at_local))}</span></div>
+        <div class="tg-chat-bottom"><span class="tg-chat-prev">${prev}</span><span class="tg-badge">${Number(c.message_count)||0}</span></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function refreshMessageChats(){
+  try{
+    const d=await (await fetch('/api/messages/chats')).json();
+    if(!d.ok)return;
+    tgState.chats=d.chats||[];
+    renderChatList();
+    if(tgState.current){
+      const c=tgState.chats.find(x=>x.chat_id===tgState.current);
+      if(c)document.getElementById('tgHeadSub').textContent=(tgIsGroup(c)?'Group':'User DM')+' · '+c.message_count+' messages';
+    }
+    if(!tgState.initialized){
+      tgState.initialized=true;
+      if(tgState.chats.length&&!tgState.current)selectChat(tgState.chats[0].chat_id);
+    }
+  }catch(e){}
+}
+
+function selectChat(id){
+  tgState.current=String(id);
+  tgState.pagedBack=false;
+  tgState.oldestId=null;
+  const c=tgState.chats.find(x=>x.chat_id===tgState.current)||{title:id,chat_type:'private',message_count:0};
+  document.getElementById('tgHeader').style.display='flex';
+  document.getElementById('tgHeadTitle').textContent=c.title||id;
+  document.getElementById('tgHeadSub').textContent=(tgIsGroup(c)?'Group':'User DM')+' · '+c.message_count+' messages';
+  const av=document.getElementById('tgHeadAvatar');
+  av.style.background=tgColor(id);
+  av.textContent=tgIsGroup(c)?'👥':String(c.title||'?').trim().charAt(0).toUpperCase();
+  const enc=encodeURIComponent(id);
+  document.getElementById('tgDlTxt').href='/api/messages/export?chat_id='+enc+'&format=txt';
+  document.getElementById('tgDlJson').href='/api/messages/export?chat_id='+enc+'&format=json';
+  document.getElementById('tgDlCsv').href='/api/messages/export?chat_id='+enc+'&format=csv';
+  document.getElementById('tgMsgSearch').value='';
+  renderChatList();
+  loadChatMessages(true,true);
+}
+
+function loadOlderMessages(){loadChatMessages(false,false);}
+
+async function loadChatMessages(reset,scrollBottom){
+  if(!tgState.current)return;
+  const id=tgState.current;
+  const thread=document.getElementById('tgThread');
+  const q=document.getElementById('tgMsgSearch').value.trim();
+  const params=new URLSearchParams({chat_id:id,limit:'200'});
+  if(q)params.set('q',q);
+  if(!reset&&tgState.oldestId)params.set('before',String(tgState.oldestId));
+  let d;
+  try{d=await (await fetch('/api/messages?'+params.toString())).json();}catch(e){return;}
+  if(id!==tgState.current||!d.ok)return;   // user switched chat meanwhile
+
+  const prevTop=thread.scrollTop, prevHeight=thread.scrollHeight;
+  const atBottom=thread.scrollHeight-thread.scrollTop-thread.clientHeight<80;
+  if(reset){tgState.messages=d.messages;tgState.pagedBack=false;}
+  else{tgState.messages=d.messages.concat(tgState.messages);tgState.pagedBack=true;}
+  tgState.hasMore=d.has_more;
+  tgState.oldestId=tgState.messages.length?tgState.messages[0].id:null;
+  renderThread();
+  if(scrollBottom||(reset&&atBottom))thread.scrollTop=thread.scrollHeight;
+  else if(!reset)thread.scrollTop=thread.scrollHeight-prevHeight+prevTop;
+  else thread.scrollTop=prevTop;
+}
+
+function renderThread(){
+  const thread=document.getElementById('tgThread');
+  const msgs=tgState.messages;
+  const q=document.getElementById('tgMsgSearch').value.trim();
+  if(!msgs.length){
+    thread.innerHTML='<div class="tg-empty">'+(q?'No messages match your search.':'No messages in this chat yet.')+'</div>';
+    return;
+  }
+  let html='';
+  if(tgState.hasMore)html+='<div class="tg-more"><button type="button" class="btn btn-ghost btn-sm" onclick="loadOlderMessages()">⬆ Load older messages</button></div>';
+  let lastDate='',prev=null;
+  for(const m of msgs){
+    const date=(m.sent_at_local||'').slice(0,10);
+    if(date!==lastDate){html+='<div class="tg-date"><span>'+esc(date)+'</span></div>';lastDate=date;}
+    const showHead=!prev||prev.user_id!==m.user_id||(prev.sent_at_local||'').slice(0,10)!==date;
+    html+=renderBubble(m,showHead);
+    prev=m;
+  }
+  thread.innerHTML=html;
+}
+
+function renderBubble(m,showHead){
+  const color=tgColor(m.user_id);
+  const name=m.user_name||'User';
+  const uname=m.username?'<span class="tg-uname">@'+esc(m.username)+'</span>':'';
+  const time=String(m.sent_at_local||'').slice(11,16);
+  let quote='';
+  if(m.reply_to_message_id){
+    quote='<div class="tg-quote" style="border-color:'+color+'" onclick="jumpTo('+Number(m.reply_to_message_id)+')">'+
+      '<div class="tg-quote-name" style="color:'+color+'">↩ '+esc(m.reply_to_user_name||'Message')+'</div>'+
+      '<div class="tg-quote-text">'+esc(m.reply_to_text||'')+'</div></div>';
+  }
+  const avatar=showHead?'<div class="tg-avatar tg-avatar-sm" style="background:'+color+'">'+tgInitial(name)+'</div>':'<div class="tg-avatar-spacer"></div>';
+  const head=showHead?'<div class="tg-name" style="color:'+color+'">'+esc(name)+uname+'</div>':'';
+  return '<div class="tg-row'+(showHead?' tg-row-head':'')+'" id="tg-m-'+Number(m.message_id)+'">'+avatar+
+    '<div class="tg-bubble">'+head+quote+'<div class="tg-text">'+esc(m.text||'')+'</div>'+
+    '<div class="tg-meta">'+esc(time)+'</div></div></div>';
+}
+
+function jumpTo(mid){
+  const el=document.getElementById('tg-m-'+mid);
+  if(!el){showToast('The original message is not loaded — use "Load older messages".','error');return;}
+  el.scrollIntoView({block:'center',behavior:'smooth'});
+  el.classList.add('tg-flash');
+  setTimeout(()=>el.classList.remove('tg-flash'),1400);
+}
+
+// Live refresh while the Messages section is open
+setInterval(()=>{
+  const sec=document.getElementById('section-messages');
+  if(!sec||!sec.classList.contains('active'))return;
+  refreshMessageChats();
+  if(tgState.current&&!tgState.pagedBack)loadChatMessages(true,false);
+},15000);
 </script>
 </body>
 </html>

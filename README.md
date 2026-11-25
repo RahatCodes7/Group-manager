@@ -54,6 +54,28 @@ numbers, no simulated release notes, no fake features. Welcome media is optional
 
 ---
 
+## 💬 Messages Viewer (Dashboard)
+
+The web dashboard has a **💬 Messages** page with a Telegram-style dark layout:
+
+- **Chats on the left** — every private chat with a user (DM with the bot) and every group,
+  filterable by *Users* / *Groups* and searchable. Each shows the latest message and a count.
+- **Conversation on the right** — messages as chat bubbles with sender names, dates and times
+  (in `CHAT_ACTIVITY_TIMEZONE`). Replies show a quote of the message being answered; click the
+  quote to jump to it.
+- **Search** inside a chat, **Load older messages** for long histories, and live refresh every 15s.
+- **Download** a chat as **TXT** (readable transcript), **JSON** (full data) or **CSV** (Excel-ready, UTF-8 BOM).
+
+Messages are captured with a Telegram middleware, so existing commands and moderation behave exactly
+as before. Only text and media captions/labels are stored (media files themselves are not). Controlled by:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MESSAGE_LOG_ENABLED` | `1` | `0` turns message capture off |
+| `MESSAGE_LOG_RETENTION_DAYS` | `90` | Older messages are deleted automatically; `0` keeps them forever |
+
+---
+
 ## 📖 Full Command List
 
 ### 🛡️ Anti-Spam & Protection
