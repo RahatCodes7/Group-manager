@@ -8,7 +8,7 @@ Messages viewer was deployed only exist in Telegram itself. To bring them in:
      "Export chat history" → Format: JSON → untick media (optional) → Export.
   2. Run this script on the same machine/environment that has DATABASE_URL:
 
-       python import_telegram_export.py result.json
+       python scripts/import_telegram_export.py result.json
 
      Options:
        --dry-run     parse and count only, write nothing
@@ -20,7 +20,6 @@ safe: rows that already exist (same chat + message id) are skipped.
 
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 
 # Telegram Desktop export "type" values → Bot API style chat ids
@@ -152,7 +151,3 @@ def main():
         db.save_chat_message(row)  # duplicates (same chat + message id) are ignored by the DB
     print(f"Done. Processed {len(rows)} message(s); ones already in the database were skipped.")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
