@@ -89,8 +89,8 @@ fetch past chat history. To bring them in, export the chat from **Telegram Deskt
 (⋮ → *Export chat history* → Format **JSON**) and run:
 
 ```bash
-python import_telegram_export.py result.json            # imports into DATABASE_URL
-python import_telegram_export.py result.json --dry-run  # just count, write nothing
+python scripts/import_telegram_export.py result.json            # imports into DATABASE_URL
+python scripts/import_telegram_export.py result.json --dry-run  # just count, write nothing
 ```
 
 Re-running is safe: messages already present are skipped. Replies are linked when the replied-to
@@ -231,8 +231,14 @@ links table (`group_members`) in sync — **no fabricated counts, ever**:
 ├── bot_handlers.py        # All Telegram commands & handlers
 ├── chat_activity.py       # Rankings / activity system + leaderboard image generator
 ├── database.py            # DB layer (PostgreSQL via DATABASE_URL, auto-migration)
+├── message_log/           # Messages viewer package
+│   ├── capture.py         # Stores incoming user DMs + group messages (middleware)
+│   ├── exporter.py        # TXT / JSON / CSV export
+│   └── importer.py        # Imports a Telegram Desktop JSON export
+├── scripts/
+│   └── import_telegram_export.py  # CLI for the importer
 ├── templates/
-│   ├── dashboard.html     # Main dashboard (Overview, Leaderboard, Groups, etc.)
+│   ├── dashboard.html     # Main dashboard (Overview, Messages, Leaderboard, etc.)
 │   └── leaderboard.html  # Public leaderboard (no auth)
 ├── .env.example           # Environment template
 ├── requirements.txt       # Python dependencies
@@ -241,6 +247,8 @@ links table (`group_members`) in sync — **no fabricated counts, ever**:
 ├── group_sync.py          # Background sync engine (registration + jobs)
 └── tictactoe.py         # Tic-Tac-Toe game state machine
 ```
+
+New `.py` files and folders are picked up by the Docker build automatically (the Dockerfile copies the whole project, minus what `.dockerignore` excludes).
 
 ---
 

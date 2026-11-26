@@ -46,9 +46,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
 
 COPY --from=builder --chown=app:app /venv /venv
 
-# Application code (all modules the app imports at startup)
-COPY --chown=app:app app.py bot_handlers.py bot_manager.py chat_activity.py database.py dashboard_menu.py group_sync.py message_log.py import_telegram_export.py tictactoe.py ./
-COPY --chown=app:app templates ./templates
+# Application code: the whole project, minus anything listed in .dockerignore.
+# New modules and folders are included automatically — no per-file list to maintain.
+COPY --chown=app:app . ./
 
 USER app
 
