@@ -33,8 +33,8 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .page-title{font-size:1.9rem;font-weight:800;background:linear-gradient(to right,#fff,#94a3b8);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
 .page-subtitle{color:var(--text-muted);font-size:0.88rem;margin-top:4px;}
 .section{display:none;}.section.active{display:block;}
-.toast-area{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:10px;max-width:360px;}
-.toast{padding:14px 18px;border-radius:14px;font-size:0.88rem;font-weight:500;display:flex;align-items:center;gap:10px;animation:slideIn 0.3s ease;box-shadow:var(--shadow);}
+.toast-area{position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:10px;max-width:360px;pointer-events:none;}
+.toast{padding:14px 18px;border-radius:14px;font-size:0.88rem;font-weight:500;display:flex;align-items:center;gap:10px;animation:slideIn 0.3s ease;box-shadow:var(--shadow);pointer-events:none;}
 .toast-success{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);color:#34d399;}
 .toast-error{background:rgba(244,63,94,0.15);border:1px solid rgba(244,63,94,0.3);color:#fb7185;}
 .toast-info{background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);color:var(--primary-light);}
@@ -126,14 +126,16 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 @media(max-width:960px){.sidebar{display:none;}.main{padding:18px;}.grid-2,.grid-3{grid-template-columns:1fr;}.stats-grid{grid-template-columns:repeat(2,1fr);}}
 
 /* ── MESSAGES VIEWER (Telegram dark theme) ── */
-.tg-app{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 210px);min-height:560px;border-radius:20px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);box-shadow:var(--shadow);background:#0e1621;}
+.tg-app{display:grid;grid-template-columns:300px minmax(0,1fr);height:calc(100vh - 170px);min-height:480px;border-radius:20px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);box-shadow:var(--shadow);background:#0e1621;}
+.tg-app.tg-full{position:fixed;inset:0;height:100vh;min-height:0;z-index:900;border-radius:0;border:none;}
+.tg-side,.tg-main{min-height:0;min-width:0;overflow:hidden;}
 .tg-side{background:#17212b;display:flex;flex-direction:column;min-width:0;border-right:1px solid #0b1219;}
 .tg-search{padding:12px;}
 .tg-search input,.tg-header input{width:100%;background:#242f3d;border:none;border-radius:18px;padding:9px 14px;color:#f5f5f5;font:inherit;font-size:0.86rem;outline:none;}
 .tg-tabs{display:flex;gap:4px;padding:0 12px 10px;}
 .tg-tab{flex:1;background:none;border:none;color:#708499;padding:7px 0;border-radius:14px;font:inherit;font-size:0.8rem;font-weight:600;cursor:pointer;}
 .tg-tab.active{background:#2b5278;color:#fff;}
-.tg-chatlist{overflow-y:auto;flex:1;}
+.tg-chatlist{overflow-y:auto;overscroll-behavior:contain;flex:1 1 auto;min-height:0;}
 .tg-chat{display:flex;gap:12px;padding:10px 12px;cursor:pointer;align-items:center;}
 .tg-chat:hover{background:#202b36;}
 .tg-chat.active{background:#2b5278;}
@@ -148,7 +150,10 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 .tg-chat-prev{color:#8b9bab;font-size:0.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
 .tg-badge{background:#3a4b5c;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;font-weight:700;flex-shrink:0;}
 .tg-chat.active .tg-badge{background:#fff;color:#2b5278;}
-.tg-main{display:flex;flex-direction:column;min-width:0;background:#0e1621;}
+.tg-main{display:flex;flex-direction:column;min-width:0;background:#0e1621;position:relative;}
+.tg-back{display:none;background:none;border:none;color:#6ab3f3;font-size:1.3rem;cursor:pointer;padding:0 6px;}
+.tg-iconbtn{background:#242f3d;border:none;color:#f5f5f5;border-radius:10px;padding:7px 10px;cursor:pointer;font-size:0.85rem;}
+.tg-iconbtn:hover{background:#2f3d4d;}
 .tg-header{align-items:center;gap:12px;padding:10px 16px;background:#17212b;border-bottom:1px solid #0b1219;flex-wrap:wrap;}
 .tg-head-info{flex:1;min-width:150px;}
 .tg-head-title{color:#f5f5f5;font-weight:700;font-size:0.98rem;}
@@ -157,7 +162,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 .tg-export{display:flex;gap:6px;flex-wrap:wrap;}
 .tg-dl{background:#2b5278;color:#fff;text-decoration:none;border-radius:10px;padding:7px 11px;font-size:0.78rem;font-weight:600;white-space:nowrap;}
 .tg-dl:hover{background:#376a9c;}
-.tg-thread{flex:1;overflow-y:auto;padding:16px 8%;background-color:#0e1621;background-image:radial-gradient(rgba(255,255,255,0.035) 1px,transparent 1px);background-size:22px 22px;}
+.tg-thread{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:16px 8%;background-color:#0e1621;background-image:radial-gradient(rgba(255,255,255,0.035) 1px,transparent 1px);background-size:22px 22px;}
 .tg-date{text-align:center;margin:12px 0;}
 .tg-date span{background:rgba(24,37,51,0.9);color:#f5f5f5;font-size:0.75rem;padding:3px 12px;border-radius:12px;}
 .tg-row{display:flex;gap:8px;margin-bottom:2px;align-items:flex-end;}
@@ -175,8 +180,19 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 .tg-row.tg-flash .tg-bubble{box-shadow:0 0 0 2px #6ab3f3;}
 .tg-more{text-align:center;margin:8px 0;}
 .tg-empty{color:#708499;text-align:center;padding:40px 16px;font-size:0.9rem;}
+.tg-composer{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#17212b;border-top:1px solid #0b1219;}
+.tg-composer input{flex:1;background:#242f3d;border:none;border-radius:18px;padding:10px 16px;color:#8b9bab;font:inherit;font-size:0.88rem;outline:none;}
+.tg-jump{position:absolute;right:22px;bottom:78px;width:40px;height:40px;border-radius:50%;border:none;background:#2b5278;color:#fff;font-size:1.1rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4);display:none;}
+.tg-jump.show{display:block;}
+.tg-sticky-date{position:sticky;top:0;}
 @media(max-width:1100px){.tg-thread{padding:16px 3%;}}
-@media(max-width:760px){.tg-app{grid-template-columns:1fr;height:auto;}.tg-side{max-height:300px;}.tg-main{min-height:520px;}}
+@media(max-width:760px){
+  .tg-app{grid-template-columns:1fr;height:calc(100vh - 150px);}
+  .tg-app.tg-has-chat .tg-side{display:none;}
+  .tg-app:not(.tg-has-chat) .tg-main{display:none;}
+  .tg-back{display:inline-block;}
+  .tg-header input{max-width:none;width:100%;}
+}
 </style>
 </head>
 <body>
@@ -324,8 +340,8 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
         </div>
       </div>
 
-      <div class="tg-app">
-        <aside class="tg-side">
+      <div class="tg-app" id="tgApp">
+        <aside class="tg-side" id="tgSide">
           <div class="tg-search"><input id="tgSearch" placeholder="Search chats…" oninput="renderChatList()"></div>
           <div class="tg-tabs">
             <button type="button" class="tg-tab active" onclick="setTgFilter('all',this)">All</button>
@@ -337,6 +353,7 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
 
         <div class="tg-main">
           <div class="tg-header" id="tgHeader" style="display:none;">
+            <button type="button" class="tg-back" onclick="tgBack()" title="Back to chats">←</button>
             <div class="tg-avatar" id="tgHeadAvatar"></div>
             <div class="tg-head-info">
               <div class="tg-head-title" id="tgHeadTitle"></div>
@@ -344,13 +361,18 @@ input:checked+.mini-slider:before{transform:translateX(18px);}
             </div>
             <input id="tgMsgSearch" placeholder="Search in this chat… (Enter)" onkeydown="if(event.key==='Enter')loadChatMessages(true,true)">
             <div class="tg-export">
-              <a class="tg-dl" id="tgDlTxt" href="#" download>⬇ TXT</a>
-              <a class="tg-dl" id="tgDlJson" href="#" download>⬇ JSON</a>
-              <a class="tg-dl" id="tgDlCsv" href="#" download>⬇ CSV</a>
+              <button type="button" class="tg-dl" onclick="tgDownload('txt')">⬇ TXT</button>
+              <button type="button" class="tg-dl" onclick="tgDownload('json')">⬇ JSON</button>
+              <button type="button" class="tg-dl" onclick="tgDownload('csv')">⬇ CSV</button>
+              <button type="button" class="tg-iconbtn" onclick="tgToggleFull()" title="Full screen (Esc to exit)">⛶</button>
             </div>
           </div>
           <div class="tg-thread" id="tgThread">
             <div class="tg-empty">Select a chat on the left to read its messages.</div>
+          </div>
+          <button type="button" class="tg-jump" id="tgJump" onclick="tgScrollBottom()" title="Jump to latest">↓</button>
+          <div class="tg-composer">
+            <input disabled placeholder="Read-only archive — messages are not sent from the dashboard">
           </div>
         </div>
       </div>
@@ -1970,15 +1992,55 @@ function selectChat(id){
   av.style.background=tgColor(id);
   av.textContent=tgIsGroup(c)?'👥':String(c.title||'?').trim().charAt(0).toUpperCase();
   const enc=encodeURIComponent(id);
-  document.getElementById('tgDlTxt').href='/api/messages/export?chat_id='+enc+'&format=txt';
-  document.getElementById('tgDlJson').href='/api/messages/export?chat_id='+enc+'&format=json';
-  document.getElementById('tgDlCsv').href='/api/messages/export?chat_id='+enc+'&format=csv';
+  document.getElementById('tgApp').classList.add('tg-has-chat');
   document.getElementById('tgMsgSearch').value='';
   renderChatList();
   loadChatMessages(true,true);
 }
 
 function loadOlderMessages(){loadChatMessages(false,false);}
+
+function tgBack(){document.getElementById('tgApp').classList.remove('tg-has-chat');}
+function tgToggleFull(){
+  const app=document.getElementById('tgApp');
+  app.classList.toggle('tg-full');
+  document.body.style.overflow=app.classList.contains('tg-full')?'hidden':'';
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){const app=document.getElementById('tgApp');if(app&&app.classList.contains('tg-full'))tgToggleFull();}
+});
+function tgScrollBottom(){const t=document.getElementById('tgThread');t.scrollTop=t.scrollHeight;}
+document.addEventListener('DOMContentLoaded',()=>{
+  const t=document.getElementById('tgThread');
+  if(t)t.addEventListener('scroll',()=>{
+    const far=t.scrollHeight-t.scrollTop-t.clientHeight>200;
+    document.getElementById('tgJump').classList.toggle('show',far&&!!tgState.current);
+  });
+});
+
+// Download: fetch the file with the dashboard session, then save it. Errors are shown instead of failing silently.
+async function tgDownload(fmt){
+  if(!tgState.current){showToast('Select a chat first','error');return;}
+  const url='/api/messages/export?chat_id='+encodeURIComponent(tgState.current)+'&format='+fmt;
+  try{
+    const r=await fetch(url,{credentials:'same-origin'});
+    if(!r.ok)throw new Error('server returned '+r.status);
+    const ct=r.headers.get('content-type')||'';
+    if(ct.includes('text/html'))throw new Error('your session expired — log in again');
+    const blob=await r.blob();
+    const m=/filename="([^"]+)"/.exec(r.headers.get('content-disposition')||'');
+    const name=m?m[1]:'messages.'+fmt;
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    showToast('⬇ Downloaded '+name);
+  }catch(e){
+    showToast('❌ Download failed: '+e.message,'error');
+  }
+}
 
 async function loadChatMessages(reset,scrollBottom){
   if(!tgState.current)return;
